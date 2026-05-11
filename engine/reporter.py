@@ -93,6 +93,21 @@ def _extract_victim_details(signals: ProtocolSignals, ctx: AnalysisContext | Non
                 if kip and kip != "nan":
                     details["ip"] = kip
 
+    # AD domain from SMB DC server FQDN — always override DHCP/Kerberos domain.
+    # SMB server FQDNs contain the actual AD DNS domain and are the most authoritative
+    # source. DHCP may provide a generic name (e.g. mshome.net); Kerberos gives the
+    # NetBIOS realm (short name). The DC's FQDN always reflects the real AD domain.
+    smb_df_raw = parse_log(f"{log_dir}/smb_mapping.log")
+    if not smb_df_raw.empty and "path" in smb_df_raw.columns:
+        for _, row in smb_df_raw.iterrows():
+            path = str(row.get("path", ""))
+            if path.startswith("\\\\"):
+                server = path[2:].split("\\")[0]  # SERVER.domain.tld
+                parts = server.split(".")
+                if len(parts) >= 3:  # hostname.domain.tld — 3+ labels required
+                    details["domain"] = ".".join(parts[1:]).lower()
+                    break
+
     # mDNS .local hostname — fallback when DHCP is absent.
     # Hosts query their own .local name; the leftmost label IS the hostname.
     if details["hostname"] is None and details["ip"]:

@@ -8,6 +8,7 @@ required_protocols: [kerberos]
 
 minimum_presence:
   kerberos_packet_count: 1
+  kerberos_rc4_tgs_count: 1    # RC4 is required — AES TGS tickets cannot be cracked offline
 
 signals:
   - id: high_tgs_req_count
