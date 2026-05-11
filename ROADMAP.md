@@ -1,6 +1,6 @@
 # PCAP Engine — Roadmap
 
-> Live document. Update status fields in-place. Last updated: 2026-05-11 (v10.1 — Bug Sprint v10B complete, 5/5 IOC verification fixes)
+> Live document. Update status fields in-place. Last updated: 2026-05-12 (v10.2 — Sprint 9A complete, JA3 fingerprinting live)
 
 ---
 
@@ -15,6 +15,7 @@
 | Bug Sprint v9B — 2 More Fixes | ✅ Done | SMB FQDN domain override (authoritative over DHCP/Kerberos), Kerberoasting RC4 gate |
 | Sprint 10A — 8 New Playbooks | ✅ Done | 30/30 target; 6 new signals (WinRM, inbound scan, PTR, base64, C2 service DNS) |
 | Bug Sprint v10B — 5 IOC Fixes | ✅ Done | Suricata domain regex (space-TLD), safe-domain filter, cert anomaly IPs, scan IP filter, domain gate |
+| Sprint 9A — JA3 Fingerprinting | ✅ Done | zkg salesforce/ja3 installed; packages keyword in Zeek cmd; check_ja3() in phase6; JA3 section in report |
 | Phase 2.5 — Suricata | ✅ Implemented | Graceful skip if not installed; ET Open rules |
 | Phase 3 — TTP Sweep | ✅ Implemented | Parallel YAML scoring; tiered thresholds; Suricata boost |
 | Phase 4 — Deep Dive | ✅ Implemented | Targeted tshark evidence for high-score TTPs |
@@ -128,10 +129,12 @@
 ### Critical (blocks detection quality)
 | Gap | Impact | Sprint |
 |---|---|---|
-| Zeek JA3 package not installed | TLS fingerprinting always shows "not installed" | 9A |
-| Suricata not installed | Zero signature-layer detection | 9B or manual |
-| No formal verification | Can't claim correctness | **MUST DO FIRST** |
-| 9 playbooks missing | 30% of target TTP coverage absent | 10A |
+| ~~Zeek JA3 package not installed~~ | ~~TLS fingerprinting unavailable~~ | ✅ 9A done |
+| ~~Suricata not installed~~ | ~~Zero signature-layer detection~~ | ✅ Done |
+| ~~No formal verification~~ | ~~Can't claim correctness~~ | ✅ 5 PCAPs verified |
+| ~~9 playbooks missing~~ | ~~30% TTP coverage absent~~ | ✅ 10A done, 30/30 |
+| Single-query suspicious domain detection | Delivery domains with 1 DNS query missed (classicgrand.com etc.) | 11A |
+| Full domain from SMB path parsing | Kerberos realm is NetBIOS not FQDN; SMB paths have full domain | 11A |
 
 ### Important (reduces coverage)
 | Gap | Impact | Sprint |
@@ -159,10 +162,11 @@
 - [x] Run all 5 PCAPs and populate verification matrix above ✅ Done v9
 - [x] Document FP/FN findings; tune signal weights if needed ✅ Done v9
 
-### Sprint 9A — Zeek JA3
-- [ ] `zkg install zeek/sethhall/ja3` — enable JA3 in Zeek run
-- [ ] JA3 hash lookup in Phase 6 (offline: hardcoded known-bad list)
-- [ ] Add `tls_unique_ja3_count` signal to relevant playbooks
+### Sprint 9A — Zeek JA3 ✅ COMPLETE
+- [x] `zkg install zeek/salesforce/ja3` — JA3/JA3S now in ssl.log via `packages` keyword
+- [x] JA3 hash lookup in Phase 6 — `check_ja3()` offline; known-bad list: CS, Meterpreter, RATs
+- [x] JA3 section in report (active/inactive status, match table)
+- [ ] Add `tls_unique_ja3_count` signal to T1573.001 playbook (deferred — playbook already fires correctly)
 
 ### Sprint 9B — Sigma Rules
 - [ ] Shallow clone `SigmaHQ/sigma` (network/zeek rules only)
