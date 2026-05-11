@@ -41,28 +41,66 @@
 
 ## Verified Against Ground Truth
 
-> ⚠️ **NOTHING IS VERIFIED YET.**
-> Verification requires comparing engine output against official answer PDFs.
-
-### Verification Process (to do)
-For each PCAP in `pcap_samples_for_test/`:
-1. Run engine → `outputs/<pcap_date>/report.md`
-2. Read `samples_answers/<pcap_date>-answers.pdf`
-3. Compare: were the same TTPs, IPs, hostnames, users found?
-4. Record: TP / FP / FN per finding
-5. Update this table
-
 ### Verification Matrix
 
-| PCAP Date | Run | TTPs Match | Victim Match | IOCs Match | Score |
-|---|---|---|---|---|---|
-| 2024-09-04 | ❌ Not run | — | — | — | — |
-| 2024-11-26 | ✅ Output exists | ❌ Uncompared | ❌ Uncompared | ❌ Uncompared | — |
-| 2025-01-22 | ❌ Not run | — | — | — | — |
-| 2026-01-31 | ❌ Not run | — | — | — | — |
-| 2026-02-28 | ✅ Output exists | ❌ Uncompared | ❌ Uncompared | ❌ Uncompared | — |
+| PCAP Date | Run | Victim IP | Hostname | Windows User | C2 IP | Malware Family | Score |
+|---|---|---|---|---|---|---|---|
+| 2024-09-04 | ❌ | — | — | — | — | — | — |
+| **2024-11-26** | ✅ v8 | ✅ | ❌ partial | ✅ | ❌ FN | ❌ missed | **~5/10** |
+| 2025-01-22 | ❌ | — | — | — | — | — | — |
+| 2026-01-31 | ❌ | — | — | — | — | — | — |
+| 2026-02-28 | ❌ run only | — | — | — | — | — | — |
 
-Answer PDFs: `samples_answers/` (5 of 6 PCAPs have answers)
+---
+
+### 2024-11-26 — Full Analysis (NetSupport RAT / SmartApeSG)
+
+**Ground truth**: NetSupport RAT, delivered via SmartApeSG fake browser update (`classicgrand.com` → `modandcrackedapk.com` → `Udate.js`). C2 to `194.180.191.64:443` (HTTP POST, not HTTPS).
+
+**Victim (answer)**: IP `10.11.26.183` · Hostname `DESKTOP-B8TQK49` · MAC `d0:57:7b:ce:fc:8b` · User `oboomwald` · Domain `nemotodes.health`
+
+#### True Positives ✅
+| Finding | Evidence |
+|---|---|
+| Victim IP `10.11.26.183` | Correctly identified |
+| Windows user `oboomwald` | Correctly extracted from Kerberos |
+| 58 HTTP POSTs to C2 | Anomaly layer flagged high POST volume |
+| `fakeurl.htm` files hashed | Phase 5 extracted all 71 files including the RAT payloads |
+| Domain `nemotodes.health` | Visible in SMB path evidence |
+| Hostname in DNS evidence | `desktop-b8tqk49.local` present in T1071.004 deep dive |
+
+#### False Negatives ❌ (missed)
+| Item | Root Cause | Fix |
+|---|---|---|
+| C2 IP `194.180.191.64` not in IOC | IOC extraction uses top-talkers by **bytes** — 58 small POSTs = tiny byte total, below threshold | Extract IOC IPs from HTTP POST destinations in http.log, not just top talkers |
+| Domains `classicgrand.com`, `modandcrackedapk.com` not flagged | `dns_suspicious_parent_count` threshold = >10 unique FQDNs; these each had only 1 query | Add single-query suspicious domain detection; lower threshold or add separate signal |
+| `netsupportsoftware.com` not flagged | Same — 1 unique FQDN | Same fix |
+| Hostname `DESKTOP-B8TQK49` not in Victim Details | Extractor only reads DHCP log (absent); mDNS query `desktop-b8tqk49.local` exists but not parsed | Parse hostname from mDNS `.local` queries where `id.orig_h` is the victim IP |
+| MAC `d0:57:7b:ce:fc:8b` missing | No DHCP log; ARP not correlated to victim | Parse MAC from ARP `arp.src.hw_mac` where `arp.src.proto_ipv4 == victim_ip` |
+| Malware family not identified | No NetSupport RAT playbook | Add `T1219_netsupport_rat.yaml` + detection via HTTP POST to `:443/fakeurl.htm` |
+
+#### False Positives ❌ (over-triggered)
+| Finding | Root Cause | Fix |
+|---|---|---|
+| **T1048.001 DNS TXT Exfil score 1.0** | `nemotoads.health` has 6 FQDNs — all AD SRV records (`_ldap._tcp`, `_msdcs`, etc.). Not tunneling. | Exclude subdomains starting with `_` (AD SRV) from suspicious diversity count |
+| **T1071.004 DNS Tunneling score 0.8** | Same — AD SRV records + mDNS `desktop-b8tqk49.local` entropy (3.64) | Same fix + exclude `.local` mDNS from entropy scoring |
+| **T1003.006 DCSync score 1.0** | `drsuapi` present (50 packets) — but this is likely normal DC replication, not attacker DCSync | Require drsuapi source IP to be a **non-DC host**; corroborate with anomalous Kerberos |
+| **T1558.003 Kerberoasting score 0.4** | 6 TGS requests — normal Windows auth, not Kerberoasting | Require RC4 cipher or SPN count > 3 distinct services for minimum gate |
+
+#### Score
+- Victim identification: **2/5** (IP ✅, user ✅, hostname ❌, MAC ❌, domain ❌)
+- IOC identification: **0/3** (C2 IP ❌, delivery domains ❌, RAT domain ❌)
+- Attack chain detection: **partial** — activity flagged but wrong TTPs named (DNS tunneling instead of RAT C2)
+- Artifacts: **strong** — fakeurl.htm files extracted and hashed correctly
+- **Overall: ~5/10** — the engine sees something is wrong but misidentifies the primary technique
+
+#### Priority Bugs to Fix (ordered)
+1. **[HIGH] AD SRV record FP** — filter `_ldap`, `_kerberos`, `_msdcs` prefixes from `dns_suspicious_parent_count`
+2. **[HIGH] C2 IOC extraction** — add HTTP POST destination IPs to IOC list regardless of byte volume  
+3. **[HIGH] Hostname from mDNS** — parse `desktop-b8tqk49` from `.local` mDNS when victim is `id.orig_h`
+4. **[MEDIUM] DCSync gate** — require source IP != DC IP before firing drsuapi signal
+5. **[MEDIUM] MAC from ARP** — parse victim MAC from ARP in Phase 1
+6. **[LOW] NetSupport RAT playbook** — HTTP POST to port 443 with `/fakeurl.htm` or `fakeurl` pattern
 
 ---
 
