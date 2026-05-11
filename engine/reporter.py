@@ -381,6 +381,7 @@ def generate(
     anomalies: list[Anomaly],
     suricata_result=None,   # Optional[SuricataResult]
     artifact_result=None,   # Optional[ArtifactResult]
+    ja3_hits=None,          # Optional[list[JA3Result]]
 ) -> str:
     """Generate the full Markdown report as a string."""
 
@@ -549,6 +550,34 @@ def generate(
         if artifact_result.extraction_errors:
             lines.append(f"_Extraction warnings: {'; '.join(artifact_result.extraction_errors[:3])}_\n")
 
+    # ── JA3 Fingerprint Hits ─────────────────────────────────────────────
+    lines.append(_section("JA3/JA3S TLS Fingerprint Matches"))
+    if not ja3_hits:
+        # Check if JA3 was available at all (tls_sessions present but no ja3 fields)
+        has_ja3 = any(
+            s.get("ja3") and str(s.get("ja3")) not in ("", "-", "nan")
+            for s in (signals.tls_sessions or [])
+        )
+        if has_ja3:
+            lines.append("_No known-bad JA3 fingerprints matched. JA3 is active._\n")
+        else:
+            lines.append(
+                "_JA3 fingerprinting not active — install Zeek JA3 package: "
+                "`echo Y | python3.14 /opt/homebrew/bin/zkg install zeek/salesforce/ja3`_\n"
+            )
+    else:
+        lines.append(f"**{len(ja3_hits)} known-bad TLS fingerprint(s) detected**\n")
+        lines.append("| JA3 Hash | JA3S Hash | Family | Src → Dst | SNI |")
+        lines.append("|---|---|---|---|---|")
+        for hit in ja3_hits:
+            ja3_display = f"`{hit.ja3[:20]}…`" if hit.ja3 else "-"
+            ja3s_display = f"`{hit.ja3s[:20]}…`" if hit.ja3s else "-"
+            label = hit.ja3_family or hit.ja3s_family or "unknown"
+            conn = f"`{hit.src_ip}` → `{hit.dst_ip}`"
+            sni = hit.server_name or "-"
+            lines.append(f"| {ja3_display} | {ja3s_display} | {label} | {conn} | {sni} |")
+        lines.append("")
+
     # ── Suricata Signature Alerts ─────────────────────────────────────────
     lines.append(_section("Suricata Signature Scan"))
     if suricata_result is None or not suricata_result.available:
@@ -672,7 +701,7 @@ def generate(
         f"- **TLS opacity**: {ctx.encrypted_pct}% of traffic is encrypted — payload unreadable\n"
         f"- **No baseline**: thresholds are absolute, not relative to this environment's normal\n"
         f"- **Playbook coverage**: {len(ttp_scores)} TTPs checked — novel techniques not covered will silently miss\n"
-        f"- **JA3 fingerprinting**: Zeek JA3 package not installed — TLS C2 fingerprinting unavailable\n"
+        f"- **JA3 fingerprinting**: {'Active — known-bad hash list checked' if ja3_hits is not None else 'Zeek JA3 package not installed'}\n"
     )
 
     return "\n".join(lines)

@@ -336,7 +336,7 @@ def _tls_signals(ssl_df: pd.DataFrame, x509_df: pd.DataFrame, packet_count: int)
             out["tls_cert_anomaly_ips"] = list(dict.fromkeys(anomaly_ips))  # dedupe, preserve order
 
     # Keep top sessions for deep dive
-    cols = [c for c in ["id.orig_h", "id.resp_h", "server_name", "ja3", "version"] if c in ssl_df.columns]
+    cols = [c for c in ["id.orig_h", "id.resp_h", "server_name", "ja3", "ja3s", "version"] if c in ssl_df.columns]
     out["tls_sessions"] = ssl_df[cols].head(50).to_dict("records")
 
     return out

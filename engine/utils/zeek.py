@@ -17,6 +17,10 @@ import pandas as pd
 
 ZEEK_BIN = shutil.which("zeek") or "/opt/homebrew/bin/zeek"
 
+# 'packages' loads all zkg-installed packages (e.g. JA3/JA3S) when present.
+# Zeek silently succeeds even if no packages are installed, so this is always safe.
+_ZEEK_PACKAGES_SCRIPT = "packages"
+
 
 class ZeekError(Exception):
     pass
@@ -47,6 +51,7 @@ def run_zeek(
         "-r", str(pcap_path),
         "LogAscii::use_json=T",         # emit JSON instead of TSV
         f"Log::default_logdir={out}",
+        _ZEEK_PACKAGES_SCRIPT,          # load zkg packages (JA3/JA3S if installed)
     ]
 
     result = subprocess.run(

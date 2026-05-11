@@ -164,6 +164,13 @@ def main() -> None:
         max_ips=args.max_iocs,
         offline=args.offline,
     )
+    # JA3/JA3S fingerprint check (offline, always runs)
+    ja3_hits = phase6_ioc_enrichment.check_ja3(signals)
+    if ja3_hits:
+        print(f"  [Phase 6] JA3 fingerprint matches: {len(ja3_hits)} known-bad signature(s)")
+        for hit in ja3_hits:
+            label = hit.ja3_family or hit.ja3s_family
+            print(f"    JA3 {hit.ja3[:16]}… → {label} (dst={hit.dst_ip})")
     print(f"          Done in {time.time()-t0:.1f}s\n")
 
     # ── Phase 7: Anomaly Layer ────────────────────────────────────────────
@@ -181,6 +188,7 @@ def main() -> None:
         ctx, signals, ttp_scores, deep_dives, ioc_results, anomalies,
         suricata_result=suricata_result,
         artifact_result=artifact_result,
+        ja3_hits=ja3_hits,
     )
     paths = reporter.write(report_md, ttp_scores, anomalies, out_dir)
 
