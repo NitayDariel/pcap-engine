@@ -32,9 +32,13 @@ signals:
     attack_category: B
 
   - id: high_subdomain_entropy
-    description: Maximum subdomain Shannon entropy >= 3.5 bits (random-looking encoded data)
+    description: >
+      Maximum subdomain Shannon entropy >= 4.0 bits. Real DNS tunneling encodes binary data
+      in base32/base64 labels, producing entropy > 4.0. Legitimate domains (CDN, AD SRV,
+      hash IDs) typically produce 3.0-3.8 bits — NOT sufficient for offline cracking, hence
+      the higher gate. Setting this at 3.5 produced FPs on AD lab traffic.
     source: dns_max_subdomain_entropy
-    threshold: ">= 3.5"
+    threshold: ">= 4.0"
     weight: 0.35
     attack_category: B
 

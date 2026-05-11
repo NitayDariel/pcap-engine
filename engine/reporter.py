@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -79,8 +80,14 @@ def _extract_victim_details(signals: ProtocolSignals, ctx: AnalysisContext | Non
     kerb_df = parse_log(f"{log_dir}/kerberos.log")
     if not kerb_df.empty and "client" in kerb_df.columns:
         valid_kerb = kerb_df[kerb_df["client"].notna()]
-        if not valid_kerb.empty:
-            first_row = valid_kerb.iloc[0]
+        # Filter out machine/computer accounts (end with '$') — we want human user accounts.
+        # Machine accounts look like "DESKTOP-ABC123$/REALM" and are not the incident victim user.
+        human_kerb = valid_kerb[
+            ~valid_kerb["client"].apply(lambda x: str(x).split("/")[0].endswith("$"))
+        ]
+        target_kerb = human_kerb if not human_kerb.empty else valid_kerb
+        if not target_kerb.empty:
+            first_row = target_kerb.iloc[0]
             raw = str(first_row["client"])
             parts = raw.split("/")
             details["windows_user"] = parts[0]
@@ -88,7 +95,7 @@ def _extract_victim_details(signals: ProtocolSignals, ctx: AnalysisContext | Non
             if len(parts) > 1 and details["domain"] is None:
                 details["domain"] = parts[1].lower()
             # If DHCP was absent, use the Kerberos client's source IP as victim IP
-            if details["ip"] is None and "id.orig_h" in valid_kerb.columns:
+            if details["ip"] is None and "id.orig_h" in target_kerb.columns:
                 kip = str(first_row.get("id.orig_h", ""))
                 if kip and kip != "nan":
                     details["ip"] = kip
@@ -137,11 +144,23 @@ def _extract_victim_details(signals: ProtocolSignals, ctx: AnalysisContext | Non
 # IOC extraction from findings + DNS + files
 # ---------------------------------------------------------------------------
 
+_DOMAIN_IN_PARENS = re.compile(r'\(([a-z0-9][a-z0-9\-._]{2,}\s*\.[a-z]{2,10})\)', re.IGNORECASE)
+_SAFE_IOC_DOMAINS = {
+    "microsoft.com", "msn.com", "office.com", "office.net", "windows.com",
+    "windowsupdate.com", "bing.com", "google.com", "googleapis.com",
+    "apple.com", "amazon.com", "akamai.com", "cloudflare.com",
+    "gvt1.com", "gvt2.com", "youtube.com", "githubusercontent.com",
+    "msedge.net", "azure.com", "azureedge.net", "azurefd.net",
+    "teamviewer.com", "zoom.us", "slack.com", "dropbox.com",
+}
+
+
 def _extract_iocs(
     ctx: AnalysisContext,
     signals: ProtocolSignals,
     ttp_scores: list[TTPScore],
     ioc_results: dict[str, IOCResult],
+    suricata_result=None,
 ) -> dict:
     """Collect IPs, domains, and file hashes associated with confirmed threats."""
     ioc_ips: set[str] = set()
@@ -154,10 +173,10 @@ def _extract_iocs(
         if ip in ctx.external_ips:
             ioc_ips.add(ip)
 
-    # Scan candidates (active scanners)
+    # Scan candidates (active scanners) — only external sources
     for c in signals.scan_candidates:
         ip = c.get("src", "")
-        if ip:
+        if ip and ip not in ctx.internal_ips:
             ioc_ips.add(ip)
 
     # Large outbound transfer destinations
@@ -171,15 +190,23 @@ def _extract_iocs(
         if ip in ctx.external_ips:
             ioc_ips.add(ip)
 
+    # External IPs with TLS cert anomalies (self-signed, generic CN) — C2 infrastructure indicator
+    for ip in getattr(signals, "tls_cert_anomaly_ips", []):
+        if ip in ctx.external_ips:
+            ioc_ips.add(ip)
+
     # Confirmed/enriched malicious IPs take priority — always include
     for ip, r in ioc_results.items():
         if r.is_confirmed_malicious:
             ioc_ips.add(ip)
 
-    # Suspicious DNS parent domains (>5 unique subdomains)
+    # Suspicious DNS parent domains — only those with very high unique FQDN diversity (tunneling indicator)
+    # Gate: >10 unique FQDNs (same gate as dns_suspicious_parent_count signal) to avoid FPs on
+    # legitimate high-FQDN services like TeamViewer, CDNs, or SaaS platforms.
     for domain, count in signals.dns_top_domains[:20]:
-        if count >= 5:
-            ioc_domains.add(domain)
+        dl = domain.lower()
+        if count > 10 and not any(dl == s or dl.endswith("." + s) for s in _SAFE_IOC_DOMAINS):
+            ioc_domains.add(dl)
 
     # File hashes from Zeek files.log
     if signals.zeek_log_dir:
@@ -194,6 +221,24 @@ def _extract_iocs(
                         "source": str(row.get("tx_hosts", "")),
                         "filename": str(row.get("extracted", "")),
                     })
+
+    # Suricata-derived IOCs: domains named in signature text + C2 destination IPs.
+    # Alert signatures often embed the malicious domain in parentheses, e.g.:
+    #   "ET MALWARE Observed Win32/Lumma Stealer Related Domain (whitepepper.su)"
+    # This is the most reliable way to get C2 domains offline, without VT lookups.
+    if suricata_result and suricata_result.available and suricata_result.alerts:
+        for alert in suricata_result.alerts:
+            # Extract domains from parenthesised names in signature text
+            for raw_domain in _DOMAIN_IN_PARENS.findall(alert.signature):
+                dl = raw_domain.replace(" ", "").lower()
+                if not any(dl == s or dl.endswith("." + s) for s in _SAFE_IOC_DOMAINS):
+                    ioc_domains.add(dl)
+            # Outbound alert destinations from internal hosts are C2 candidates
+            if (ctx.internal_ips and
+                    alert.src_ip in ctx.internal_ips and
+                    alert.dst_ip not in ctx.internal_ips and
+                    alert.dst_ip):
+                ioc_ips.add(alert.dst_ip)
 
     return {
         "ips": sorted(ioc_ips),
@@ -354,7 +399,7 @@ def generate(
 
     # Pre-compute enriched data
     victim = _extract_victim_details(signals, ctx)
-    iocs = _extract_iocs(ctx, signals, ttp_scores, ioc_results)
+    iocs = _extract_iocs(ctx, signals, ttp_scores, ioc_results, suricata_result=suricata_result)
 
     # ── Header ────────────────────────────────────────────────────────────
     lines = [

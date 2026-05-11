@@ -1,6 +1,6 @@
 # PCAP Engine — Roadmap
 
-> Live document. Update status fields in-place. Last updated: 2026-05-11 (v10 — Sprint 10A complete, 30/30 playbooks)
+> Live document. Update status fields in-place. Last updated: 2026-05-11 (v10.1 — Bug Sprint v10B complete, 5/5 IOC verification fixes)
 
 ---
 
@@ -14,6 +14,7 @@
 | Bug Sprint v9 — 6 Detection Fixes | ✅ Done | DNS SRV filter, mDNS hostname, HTTP POST IOC, MAC lookup, DCSync gate, T1219 playbook |
 | Bug Sprint v9B — 2 More Fixes | ✅ Done | SMB FQDN domain override (authoritative over DHCP/Kerberos), Kerberoasting RC4 gate |
 | Sprint 10A — 8 New Playbooks | ✅ Done | 30/30 target; 6 new signals (WinRM, inbound scan, PTR, base64, C2 service DNS) |
+| Bug Sprint v10B — 5 IOC Fixes | ✅ Done | Suricata domain regex (space-TLD), safe-domain filter, cert anomaly IPs, scan IP filter, domain gate |
 | Phase 2.5 — Suricata | ✅ Implemented | Graceful skip if not installed; ET Open rules |
 | Phase 3 — TTP Sweep | ✅ Implemented | Parallel YAML scoring; tiered thresholds; Suricata boost |
 | Phase 4 — Deep Dive | ✅ Implemented | Targeted tshark evidence for high-score TTPs |
@@ -49,11 +50,11 @@
 
 | PCAP Date | Run | Victim IP | Hostname | MAC | Windows User | Domain | C2 IP | TTP Fired | Score |
 |---|---|---|---|---|---|---|---|---|---|
-| **2024-09-04** | ✅ v9 | ✅ 172.17.0.99 | ✅ DESKTOP-RNVO9AT | ✅ | ✅ afletcher | ✅ bepositive.com | ✅ 79.124.78.197 | T1219 HIGH | **~8/10** |
-| **2024-11-26** | ✅ v9 | ✅ 10.11.26.183 | ✅ desktop-b8tqk49 | ✅ | ✅ oboomwald | ✅ nemotodes.health | ✅ 194.180.191.64 | T1219 HIGH | **~8/10** |
-| **2025-01-22** | ✅ v9 | ✅ 10.1.17.215 | ✅ DESKTOP-L8C5GSJ | ✅ | ✅ shutchenson | (unverified) | 2/3 C2 IPs | T1219 LOW | **~7/10** |
-| **2026-01-31** | ✅ v9 | ✅ 10.1.21.58 | ✅ DESKTOP-ES9F3ML | ✅ | ✅ gwyatt | ✅ win11office.com | ✅ 153.92.1.49 | T1046 / T1049 | **~7/10** |
-| **2026-02-28** | ✅ v9 | ✅ 10.2.28.88 | ✅ DESKTOP-TEYQ2NR | ✅ | ✅ brolf | ✅ easyas123.tech | ✅ 45.131.214.85 | T1219 HIGH | **~8/10** |
+| **2024-09-04** | ✅ v10.1 | ✅ 172.17.0.99 | ✅ DESKTOP-RNVO9AT | ✅ | ✅ afletcher | ✅ bepositive.com | ✅ 79.124.78.197 | T1219 HIGH | **~8/10** |
+| **2024-11-26** | ✅ v10.1 | ✅ 10.11.26.183 | ✅ desktop-b8tqk49 | ✅ | ✅ oboomwald | ✅ nemotodes.health | ✅ 194.180.191.64 | T1219 HIGH | **~8/10** |
+| **2025-01-22** | ✅ v10.1 | ✅ 10.1.17.215 | ✅ DESKTOP-L8C5GSJ | ✅ | ✅ shutchenson | ✅ bluemoontuesday.com | ✅ 3/3 C2 IPs (cert join) | T1573.001 HIGH | **~8/10** |
+| **2026-01-31** | ✅ v10.1 | ✅ 10.1.21.58 | ✅ DESKTOP-ES9F3ML | ✅ | ✅ gwyatt | ✅ win11office.com | ✅ 153.92.1.49 + domains | T1046/T1049 + Lumma IOC | **~8/10** |
+| **2026-02-28** | ✅ v10.1 | ✅ 10.2.28.88 | ✅ DESKTOP-TEYQ2NR | ✅ | ✅ brolf | ✅ easyas123.tech | ✅ 45.131.214.85 | T1219 HIGH | **~8/10** |
 
 ---
 

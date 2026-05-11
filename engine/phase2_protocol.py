@@ -60,6 +60,7 @@ class ProtocolSignals:
     tls_packet_count: int = 0
     tls_unique_ja3_count: int = 0
     tls_cert_anomaly_count: int = 0
+    tls_cert_anomaly_ips: list = field(default_factory=list)
     tls_missing_sni_count: int = 0
     tls_sessions: list = field(default_factory=list)
 
@@ -284,7 +285,7 @@ def _http_signals(http_df: pd.DataFrame, pcap: str, packet_count: int) -> dict:
     return out
 
 
-def _tls_signals(ssl_df: pd.DataFrame, packet_count: int) -> dict:
+def _tls_signals(ssl_df: pd.DataFrame, x509_df: pd.DataFrame, packet_count: int) -> dict:
     out: dict = {"tls_packet_count": packet_count}
     if ssl_df.empty:
         return out
@@ -297,10 +298,42 @@ def _tls_signals(ssl_df: pd.DataFrame, packet_count: int) -> dict:
         missing_sni = ssl_df["server_name"].isna() | (ssl_df["server_name"] == "")
         out["tls_missing_sni_count"] = int(missing_sni.sum())
 
-    # Cert anomalies from validation_status
+    # Cert anomalies: validation_status in ssl.log (requires Zeek cert verification package),
+    # OR self-signed detection via x509.log subject==issuer join.
     if "validation_status" in ssl_df.columns:
         anomalies = ssl_df[ssl_df["validation_status"] != "ok"]
         out["tls_cert_anomaly_count"] = int(len(anomalies))
+        if "id.resp_h" in anomalies.columns:
+            out["tls_cert_anomaly_ips"] = list(anomalies["id.resp_h"].dropna().unique())
+    elif not x509_df.empty and "certificate.subject" in x509_df.columns and "certificate.issuer" in x509_df.columns:
+        # Detect self-signed: subject == issuer
+        self_signed = x509_df[
+            x509_df["certificate.subject"].notna() &
+            x509_df["certificate.issuer"].notna() &
+            (x509_df["certificate.subject"] == x509_df["certificate.issuer"])
+        ]
+        if not self_signed.empty and "fingerprint" in self_signed.columns and "cert_chain_fps" in ssl_df.columns:
+            # Collect fingerprints of self-signed certs then join to ssl.log to get server IPs
+            self_signed_fps = set(self_signed["fingerprint"].dropna().astype(str))
+            anomaly_ips: list[str] = []
+            for _, row in ssl_df.iterrows():
+                fps = row.get("cert_chain_fps")
+                if isinstance(fps, list):
+                    chain = fps
+                elif isinstance(fps, str):
+                    try:
+                        import json as _json
+                        chain = _json.loads(fps)
+                    except Exception:
+                        chain = [fps]
+                else:
+                    continue
+                if any(fp in self_signed_fps for fp in chain) and "id.resp_h" in ssl_df.columns:
+                    ip = row.get("id.resp_h")
+                    if ip and str(ip) not in ("nan", ""):
+                        anomaly_ips.append(str(ip))
+            out["tls_cert_anomaly_count"] = len(self_signed)
+            out["tls_cert_anomaly_ips"] = list(dict.fromkeys(anomaly_ips))  # dedupe, preserve order
 
     # Keep top sessions for deep dive
     cols = [c for c in ["id.orig_h", "id.resp_h", "server_name", "ja3", "version"] if c in ssl_df.columns]
@@ -504,6 +537,7 @@ def run(
     conn_df = parse_conn_log(log_dir_str)
     dns_df = parse_dns_log(log_dir_str)
     ssl_df = parse_ssl_log(log_dir_str)
+    x509_df = parse_log(f"{log_dir_str}/x509.log")
     http_df = parse_http_log(log_dir_str)
     smb_df = parse_log(f"{log_dir_str}/smb_mapping.log")
     kerberos_df = parse_log(f"{log_dir_str}/kerberos.log")
@@ -524,7 +558,7 @@ def run(
 
     _merge(_dns_signals(dns_df, pc.get("dns", 0)))
     _merge(_http_signals(http_df, pcap, pc.get("http", 0)))
-    _merge(_tls_signals(ssl_df, pc.get("tls", 0)))
+    _merge(_tls_signals(ssl_df, x509_df, pc.get("tls", 0)))
     _merge(_smb_signals(smb_df, ctx, pc.get("smb2", 0) + pc.get("smb", 0)))
     _merge(_scan_signals(conn_df, ctx))
     _merge(_exfil_signals(conn_df, ctx))

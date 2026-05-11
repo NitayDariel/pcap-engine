@@ -90,10 +90,17 @@ def run(
         confirmed_techniques = {
             a.mitre_technique for a in suricata_result.alerts if a.mitre_technique
         }
-        # Map base TTP IDs (T1046) and sub-technique IDs (T1046.001) to confirmed set
         for result in results:
             base = result.ttp_id.split(".")[0]
-            if result.ttp_id in confirmed_techniques or base in confirmed_techniques:
+            has_subtechnique = "." in result.ttp_id
+            # Propagation rules:
+            #   Sub-technique (T1071.004): ONLY boost on exact match.
+            #     Rationale: T1071 Suricata alerts cover ALL app-layer C2, not DNS tunneling.
+            #     Propagating T1071 → T1071.004 causes FPs (e.g. Lumma Stealer DNS → DNS Tunnel).
+            #   Base technique (T1071): boost if base confirmed directly OR any sub-technique confirmed.
+            exact_confirmed = result.ttp_id in confirmed_techniques
+            base_confirmed = not has_subtechnique and base in confirmed_techniques
+            if exact_confirmed or base_confirmed:
                 if result.confidence != "HIGH":
                     result.confidence = "HIGH"
                     result.signals_fired.append("suricata_signature_confirmed")
