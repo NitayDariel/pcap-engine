@@ -1,0 +1,47 @@
+# PCAP Engine Configuration
+# Phase 1 calibrator auto-adjusts thresholds based on capture properties.
+
+engine:
+  deep_dive_threshold: 0.60
+  report_threshold: 0.35
+  max_threads: 16
+  ioc_enrichment: true
+  anomaly_ai_layer: true
+
+paths:
+  zeek_bin: /opt/homebrew/bin/zeek
+  tshark_bin: /opt/homebrew/bin/tshark
+  suricata_bin: /opt/homebrew/bin/suricata
+  suricata_rules: /var/lib/suricata/rules
+  sigma_rules: ./sigma/rules/network
+  playbooks: ./playbooks
+  outputs: ./outputs
+
+thresholds:
+  # Beaconing (RITA-aligned)
+  beacon_score_investigate: 0.85
+  beacon_score_report: 0.70
+  beacon_min_connections: 5
+  beacon_min_duration_secs: 300
+
+  # DNS tunneling
+  dns_tunneling_min_packets: 50
+  dns_tunneling_unique_fqdn: 30
+  dns_tunneling_avg_query_len: 40
+  dns_tunneling_txt_null_ratio: 0.20
+  dns_tunneling_entropy: 3.5
+
+  # Port scanning
+  scan_unique_dst_ports: 15
+  scan_unique_dst_hosts: 10
+
+  # Lateral movement
+  lateral_new_internal_pct: 0.30
+
+  # IOC enrichment rate limiting
+  vt_requests_per_minute: 4
+  vt_requests_per_day: 480
+
+mitre:
+  taxii_url: "https://cti-taxii.mitre.org/taxii/"
+  collection: "enterprise-attack"

@@ -1,0 +1,49 @@
+ttp_id: T1557
+name: ARP Cache Poisoning / MITM
+category: lateral_movement
+mitre_tactic: TA0008
+mitre_tactic_name: Lateral Movement
+confidence_ceiling: HIGH
+required_protocols: [arp]
+
+minimum_presence:
+  arp_packet_count: 1
+
+signals:
+  - id: gratuitous_arp_burst
+    description: >
+      >= 5 gratuitous ARP packets (sender IP == target IP) — ARP poisoning tools
+      (arpspoof, ettercap, Bettercap) send unsolicited ARPs to hijack traffic.
+      Normal network equipment may send 1-2 on boot; 5+ is suspicious.
+    source: arp_gratuitous_count
+    threshold: ">= 5"
+    weight: 0.55
+    attack_category: A
+
+  - id: ip_mac_conflict
+    description: >
+      >= 1 IP address claimed by multiple MAC addresses — the hallmark of active
+      ARP spoofing. One IP cannot legitimately have two MACs simultaneously.
+    source: arp_ip_conflict_count
+    threshold: ">= 1"
+    weight: 0.65
+    attack_category: B
+
+combination_bonuses:
+  - signals: [gratuitous_arp_burst, ip_mac_conflict]
+    bonus: 0.20
+    reason: Gratuitous ARP flood + IP/MAC conflict together is definitive ARP poisoning
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.30
+
+false_positive_notes: >
+  VRRP, CARP, and other HA/failover protocols generate gratuitous ARPs by design.
+  NIC replacements and VM migrations will produce IP/MAC conflicts briefly.
+  Correlate with traffic redirection: if a third host starts appearing as next-hop
+  for victim's traffic, the MITM is active.
+
+references:
+  - "MITRE ATT&CK T1557"
+  - "https://attack.mitre.org/techniques/T1557/"

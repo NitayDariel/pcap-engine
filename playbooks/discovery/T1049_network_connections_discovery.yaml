@@ -1,0 +1,72 @@
+ttp_id: T1049
+name: System Network Connections Discovery (LDAP/CLDAP)
+category: discovery
+mitre_tactic: TA0007
+mitre_tactic_name: Discovery
+confidence_ceiling: HIGH
+required_protocols: [ldap, cldap]
+
+minimum_presence:
+  cldap_packet_count: 0
+
+signals:
+  - id: cldap_enumeration
+    description: >
+      >= 10 CLDAP (Connectionless LDAP / UDP port 389) packets — CLDAP is used
+      by Windows clients to locate domain controllers via Netlogon queries. High
+      CLDAP volume indicates automated AD topology enumeration. Also used in
+      CLDAP reflection DDoS (CVE-2017-8461) if source is external.
+    source: cldap_packet_count
+    threshold: ">= 10"
+    weight: 0.45
+    threshold_low: ">= 1"
+    weight_low: 0.18
+    attack_category: A
+
+  - id: ldap_queries
+    description: >
+      >= 50 LDAP packets — elevated LDAP query volume indicates automated
+      Active Directory enumeration (users, groups, GPOs, SPNs). Frameworks like
+      BloodHound, PowerView, and ldapdomaindump generate hundreds of LDAP queries
+      in seconds.
+    source: ldap_packet_count
+    threshold: ">= 50"
+    weight: 0.50
+    threshold_low: ">= 10"
+    weight_low: 0.20
+    attack_category: B
+
+  - id: broad_discovery_sweep
+    description: >
+      >= 10 unique hosts contacted — AD enumeration is often paired with
+      network host discovery. A host running LDAP queries AND contacting many
+      destinations is performing comprehensive reconnaissance.
+    source: scan_max_unique_dst_hosts
+    threshold: ">= 10"
+    weight: 0.25
+    attack_category: A
+
+combination_bonuses:
+  - signals: [ldap_queries, cldap_enumeration]
+    bonus: 0.20
+    reason: LDAP + CLDAP together is the exact pattern of BloodHound/PowerView AD enumeration
+
+  - signals: [ldap_queries, broad_discovery_sweep]
+    bonus: 0.15
+    reason: LDAP enumeration combined with host sweeping = full AD recon
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.25
+
+false_positive_notes: >
+  Domain-joined computers perform CLDAP DC location queries at boot and periodically.
+  Normal workstation CLDAP should be minimal (a few queries per hour). BloodHound
+  generates hundreds of LDAP queries in under a minute — check for query bursts.
+  Management tools (SCCM, AD Connect) legitimately run sustained LDAP.
+
+references:
+  - "MITRE ATT&CK T1049"
+  - "https://attack.mitre.org/techniques/T1049/"
+  - "BloodHound: Active Directory attack path mapping tool"
+  - "PowerView: AD enumeration PowerShell module"

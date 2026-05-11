@@ -1,0 +1,483 @@
+"""
+Phase 2 — Protocol-Layer Analysis.
+Computes pre-aggregated ProtocolSignals from Zeek logs + targeted tshark queries.
+Phase 3 scorer reads these fields by name — field names are the API contract with playbooks.
+"""
+
+from __future__ import annotations
+
+import math
+import tempfile
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+
+from engine.phase1_orientation import AnalysisContext
+from engine import phase2_beacon
+from engine.utils.zeek import (
+    run_zeek,
+    parse_conn_log,
+    parse_dns_log,
+    parse_ssl_log,
+    parse_http_log,
+    parse_log,
+    available_logs,
+)
+from engine.utils.tshark import fields as tshark_fields, run as tshark_run
+
+
+# ---------------------------------------------------------------------------
+# ProtocolSignals — the API contract between phase2 and playbook signals
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ProtocolSignals:
+    """Pre-aggregated signals per protocol. Field names must match playbook source: keys exactly."""
+
+    # --- DNS ---
+    dns_packet_count: int = 0
+    dns_unique_query_count: int = 0
+    dns_avg_query_length: float = 0.0
+    dns_txt_null_ratio: float = 0.0
+    dns_nxdomain_rate: float = 0.0
+    dns_max_subdomain_entropy: float = 0.0
+    dns_suspicious_parent_count: int = 0    # parent domains with >10 unique subdomains
+    dns_top_domains: list = field(default_factory=list)
+
+    # --- HTTP ---
+    http_packet_count: int = 0
+    http_cleartext_creds_detected: bool = False
+    http_unique_user_agent_count: int = 0
+    http_plaintext_post_count: int = 0
+
+    # --- TLS/SSL ---
+    tls_packet_count: int = 0
+    tls_unique_ja3_count: int = 0
+    tls_cert_anomaly_count: int = 0
+    tls_missing_sni_count: int = 0
+    tls_sessions: list = field(default_factory=list)
+
+    # --- SMB ---
+    smb_packet_count: int = 0
+    smb_admin_share_detected: bool = False
+    smb_lateral_host_count: int = 0
+
+    # --- ICMP ---
+    icmp_packet_count: int = 0
+    icmp_large_payload_count: int = 0
+
+    # --- ARP ---
+    arp_packet_count: int = 0
+    arp_gratuitous_count: int = 0
+    arp_ip_conflict_count: int = 0
+
+    # --- Port scanning ---
+    scan_candidate_count: int = 0
+    scan_max_unique_dst_ports: int = 0
+    scan_max_unique_dst_hosts: int = 0
+    scan_syn_only_connection_count: int = 0  # S0/REJ/RSTO — real scans leave many; telemetry rarely does
+    scan_candidates: list = field(default_factory=list)
+
+    # --- Kerberos ---
+    kerberos_packet_count: int = 0
+    kerberos_tgs_req_count: int = 0
+    kerberos_rc4_tgs_count: int = 0       # RC4 TGS tickets — classic Kerberoasting indicator
+    kerberos_unique_spn_count: int = 0
+    kerberos_preauth_failed_count: int = 0
+
+    # --- Credential exposure ---
+    cleartext_creds_detected: bool = False
+    cleartext_proto_list: list = field(default_factory=list)
+
+    # --- Exfiltration ---
+    large_outbound_transfers: list = field(default_factory=list)
+    max_outbound_bytes: int = 0
+
+    # --- DCSync / Replication ---
+    drsuapi_packet_count: int = 0   # MS-DRSR protocol (DCSync uses this — near-CONFIRMED T1003.006)
+
+    # --- FTP ---
+    ftp_cleartext_detected: bool = False
+
+    # --- RDP ---
+    rdp_packet_count: int = 0
+
+    # --- LDAP / CLDAP (AD enumeration) ---
+    ldap_packet_count: int = 0
+    cldap_packet_count: int = 0
+
+    # --- Beaconing (RITA-style 4-factor composite) ---
+    beacon_candidates: list = field(default_factory=list)  # list of BeaconCandidate
+    beacon_top_score: float = 0.0                          # highest composite score seen
+
+    # --- Zeek metadata ---
+    zeek_log_dir: str = ""
+    logs_available: list = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    total = len(s)
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+
+def _subdomain_of(query: str) -> str:
+    """Extract the leftmost label — what gets encoded in DNS tunnel traffic."""
+    if not isinstance(query, str):
+        return ""
+    return query.split(".")[0]
+
+
+# ---------------------------------------------------------------------------
+# Per-protocol computation functions
+# ---------------------------------------------------------------------------
+
+def _dns_signals(dns_df: pd.DataFrame, packet_count: int) -> dict:
+    out: dict = {"dns_packet_count": packet_count}
+    if dns_df.empty:
+        return out
+
+    out["dns_unique_query_count"] = int(dns_df["query"].nunique())
+    out["dns_avg_query_length"] = float(dns_df["query"].str.len().mean())
+
+    # TXT / NULL query ratio
+    type_counts = dns_df["qtype_name"].value_counts() if "qtype_name" in dns_df else pd.Series(dtype=int)
+    txt_null = int(type_counts.get("TXT", 0)) + int(type_counts.get("NULL", 0))
+    total = len(dns_df)
+    out["dns_txt_null_ratio"] = round(txt_null / total, 4) if total else 0.0
+
+    # NXDOMAIN rate
+    if "rcode_name" in dns_df.columns:
+        nxdomain = int((dns_df["rcode_name"] == "NXDOMAIN").sum())
+        out["dns_nxdomain_rate"] = round(nxdomain / total, 4) if total else 0.0
+
+    # Subdomain entropy
+    entropies = dns_df["query"].dropna().apply(lambda q: _shannon_entropy(_subdomain_of(q)))
+    out["dns_max_subdomain_entropy"] = round(float(entropies.max()), 4) if not entropies.empty else 0.0
+
+    # Parent domains with suspicious subdomain diversity (>10 unique FQDNs per parent)
+    parent_to_fqdns: dict[str, set] = {}
+    for q in dns_df["query"].dropna():
+        parts = q.split(".")
+        if len(parts) >= 2:
+            parent = ".".join(parts[-2:])
+            parent_to_fqdns.setdefault(parent, set()).add(q)
+
+    out["dns_suspicious_parent_count"] = sum(1 for v in parent_to_fqdns.values() if len(v) > 10)
+    out["dns_top_domains"] = sorted(
+        [(k, len(v)) for k, v in parent_to_fqdns.items()],
+        key=lambda x: x[1],
+        reverse=True,
+    )[:20]
+
+    return out
+
+
+def _http_signals(http_df: pd.DataFrame, pcap: str, packet_count: int) -> dict:
+    out: dict = {"http_packet_count": packet_count}
+    if http_df.empty:
+        return out
+
+    if "user_agent" in http_df.columns:
+        out["http_unique_user_agent_count"] = int(http_df["user_agent"].nunique())
+
+    if "method" in http_df.columns:
+        out["http_plaintext_post_count"] = int((http_df["method"] == "POST").sum())
+
+    # Cleartext credentials — check via tshark (HTTP Basic Auth)
+    try:
+        rows = tshark_fields(pcap, "http.authorization", "ip.src", "ip.dst", "http.authorization")
+        if rows:
+            out["http_cleartext_creds_detected"] = True
+    except Exception:
+        pass
+
+    return out
+
+
+def _tls_signals(ssl_df: pd.DataFrame, packet_count: int) -> dict:
+    out: dict = {"tls_packet_count": packet_count}
+    if ssl_df.empty:
+        return out
+
+    if "ja3" in ssl_df.columns:
+        out["tls_unique_ja3_count"] = int(ssl_df["ja3"].nunique())
+
+    # Missing SNI (server_name field absent/empty) — C2 indicator
+    if "server_name" in ssl_df.columns:
+        missing_sni = ssl_df["server_name"].isna() | (ssl_df["server_name"] == "")
+        out["tls_missing_sni_count"] = int(missing_sni.sum())
+
+    # Cert anomalies from validation_status
+    if "validation_status" in ssl_df.columns:
+        anomalies = ssl_df[ssl_df["validation_status"] != "ok"]
+        out["tls_cert_anomaly_count"] = int(len(anomalies))
+
+    # Keep top sessions for deep dive
+    cols = [c for c in ["id.orig_h", "id.resp_h", "server_name", "ja3", "version"] if c in ssl_df.columns]
+    out["tls_sessions"] = ssl_df[cols].head(50).to_dict("records")
+
+    return out
+
+
+def _smb_signals(smb_mapping_df: pd.DataFrame, ctx: AnalysisContext, packet_count: int) -> dict:
+    out: dict = {"smb_packet_count": packet_count}
+    if smb_mapping_df.empty:
+        return out
+
+    if "path" in smb_mapping_df.columns:
+        admin_shares = smb_mapping_df["path"].str.upper().str.contains(
+            r"ADMIN\$|C\$|IPC\$", na=False
+        )
+        out["smb_admin_share_detected"] = bool(admin_shares.any())
+
+        # Internal SMB lateral movement: internal host accessing SMB on another internal host
+        if "id.orig_h" in smb_mapping_df.columns and "id.resp_h" in smb_mapping_df.columns:
+            lateral = smb_mapping_df[
+                smb_mapping_df["id.orig_h"].isin(ctx.internal_ips)
+                & smb_mapping_df["id.resp_h"].isin(ctx.internal_ips)
+            ]
+            out["smb_lateral_host_count"] = int(lateral["id.resp_h"].nunique())
+
+    return out
+
+
+def _scan_signals(conn_df: pd.DataFrame, ctx: AnalysisContext) -> dict:
+    out: dict = {}
+    if conn_df.empty:
+        return out
+
+    port_groups = (
+        conn_df.groupby("id.orig_h")
+        .agg(
+            unique_dst_ports=("id.resp_p", "nunique"),
+            unique_dst_hosts=("id.resp_h", "nunique"),
+        )
+        .reset_index()
+        .rename(columns={"id.orig_h": "src"})
+    )
+
+    threshold_ports = ctx.thresholds.get("scan_unique_dst_ports", 15)
+    threshold_hosts = ctx.thresholds.get("scan_unique_dst_hosts", 10)
+
+    candidates = port_groups[
+        (port_groups["unique_dst_ports"] >= threshold_ports)
+        | (port_groups["unique_dst_hosts"] >= threshold_hosts)
+    ].sort_values("unique_dst_ports", ascending=False)
+
+    out["scan_candidate_count"] = int(len(candidates))
+    out["scan_max_unique_dst_ports"] = int(port_groups["unique_dst_ports"].max())
+    out["scan_max_unique_dst_hosts"] = int(port_groups["unique_dst_hosts"].max())
+    out["scan_candidates"] = candidates.head(10).to_dict("records")
+
+    # S0/REJ/RSTO/RSTOS0 states = SYN sent but no established connection.
+    # Real nmap scans produce thousands; normal Windows telemetry almost never does.
+    if "conn_state" in conn_df.columns:
+        syn_only_states = {"S0", "REJ", "RSTO", "RSTOS0"}
+        out["scan_syn_only_connection_count"] = int(
+            conn_df["conn_state"].isin(syn_only_states).sum()
+        )
+
+    return out
+
+
+def _exfil_signals(conn_df: pd.DataFrame, ctx: AnalysisContext) -> dict:
+    out: dict = {"max_outbound_bytes": 0, "large_outbound_transfers": []}
+    if conn_df.empty:
+        return out
+
+    threshold = ctx.thresholds.get("exfil_bytes_threshold", 10_000_000)
+
+    # Internal → external, large orig_bytes, non-encrypted port
+    if "orig_bytes" in conn_df.columns:
+        conn_df = conn_df.copy()
+        conn_df["orig_bytes"] = pd.to_numeric(conn_df["orig_bytes"], errors="coerce").fillna(0)
+        large = conn_df[
+            conn_df["id.orig_h"].isin(ctx.internal_ips)
+            & conn_df["id.resp_h"].isin(ctx.external_ips)
+            & conn_df["orig_bytes"].astype(float) > threshold
+        ]
+        if not large.empty:
+            cols = [c for c in ["id.orig_h", "id.resp_h", "id.resp_p", "orig_bytes", "proto"] if c in large.columns]
+            out["large_outbound_transfers"] = large[cols].head(10).to_dict("records")
+            out["max_outbound_bytes"] = int(conn_df["orig_bytes"].max())
+
+    return out
+
+
+def _arp_signals(pcap: str, packet_count: int) -> dict:
+    out: dict = {"arp_packet_count": packet_count}
+    if packet_count == 0:
+        return out
+
+    try:
+        # Gratuitous ARP: sender IP == target IP
+        rows = tshark_fields(
+            pcap,
+            "arp.opcode == 1 and arp.src.proto_ipv4 == arp.dst.proto_ipv4",
+            "arp.src.proto_ipv4", "arp.src.hw_mac",
+        )
+        out["arp_gratuitous_count"] = len(rows)
+
+        # IP conflict: multiple MACs claiming same IP
+        ip_to_macs: dict[str, set] = {}
+        all_rows = tshark_fields(pcap, "arp", "arp.src.proto_ipv4", "arp.src.hw_mac")
+        for row in all_rows:
+            if len(row) >= 2 and row[0] and row[1]:
+                ip_to_macs.setdefault(row[0], set()).add(row[1])
+        out["arp_ip_conflict_count"] = sum(1 for macs in ip_to_macs.values() if len(macs) > 1)
+    except Exception:
+        pass
+
+    return out
+
+
+def _kerberos_signals(kerberos_df: pd.DataFrame, packet_count: int) -> dict:
+    out: dict = {"kerberos_packet_count": packet_count}
+    if kerberos_df.empty:
+        return out
+
+    # TGS-REQ is ticket-granting-service request — high volume = Kerberoasting candidate
+    if "request_type" in kerberos_df.columns:
+        tgs = kerberos_df[kerberos_df["request_type"] == "TGS"]
+        out["kerberos_tgs_req_count"] = int(len(tgs))
+
+        # RC4 (etype 17/23 shown as "rc4-hmac" or "aes128" etc in cipher field)
+        if "cipher" in tgs.columns:
+            rc4_mask = tgs["cipher"].str.lower().str.contains("rc4", na=False)
+            out["kerberos_rc4_tgs_count"] = int(rc4_mask.sum())
+
+        # Unique SPNs requested
+        if "service" in tgs.columns:
+            out["kerberos_unique_spn_count"] = int(tgs["service"].nunique())
+
+    # Pre-auth failures: KDC_ERR_PREAUTH_FAILED — classic credential spraying indicator
+    if "error_msg" in kerberos_df.columns:
+        preauth_failed = kerberos_df["error_msg"].str.contains(
+            "KDC_ERR_PREAUTH_FAILED", na=False
+        )
+        out["kerberos_preauth_failed_count"] = int(preauth_failed.sum())
+
+    return out
+
+
+def _cleartext_creds_signals(pcap: str) -> dict:
+    out: dict = {"cleartext_creds_detected": False, "cleartext_proto_list": []}
+    protos_with_creds = []
+
+    # HTTP Basic Auth
+    try:
+        rows = tshark_fields(pcap, "http.authorization", "ip.src")
+        if rows:
+            protos_with_creds.append("http-basic-auth")
+    except Exception:
+        pass
+
+    # FTP credentials (USER/PASS in cleartext)
+    try:
+        rows = tshark_fields(pcap, "ftp.request.command == \"USER\" or ftp.request.command == \"PASS\"", "ip.src")
+        if rows:
+            protos_with_creds.append("ftp")
+    except Exception:
+        pass
+
+    if protos_with_creds:
+        out["cleartext_creds_detected"] = True
+        out["cleartext_proto_list"] = protos_with_creds
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 entry point
+# ---------------------------------------------------------------------------
+
+def run(
+    pcap_path: str,
+    ctx: AnalysisContext,
+    zeek_log_dir: Optional[str] = None,
+) -> ProtocolSignals:
+    """
+    Run Phase 2 protocol analysis. Returns populated ProtocolSignals.
+    If zeek_log_dir is None, runs Zeek internally (logs go to a temp dir).
+    """
+    pcap = str(Path(pcap_path).resolve())
+
+    # Run Zeek if no pre-existing log dir provided
+    if zeek_log_dir is None:
+        log_dir = run_zeek(pcap)
+    else:
+        log_dir = Path(zeek_log_dir)
+
+    log_dir_str = str(log_dir)
+
+    # Parse all relevant logs up front
+    conn_df = parse_conn_log(log_dir_str)
+    dns_df = parse_dns_log(log_dir_str)
+    ssl_df = parse_ssl_log(log_dir_str)
+    http_df = parse_http_log(log_dir_str)
+    smb_df = parse_log(f"{log_dir_str}/smb_mapping.log")
+    kerberos_df = parse_log(f"{log_dir_str}/kerberos.log")
+
+    # Protocol packet counts from AnalysisContext (already computed in phase1)
+    pc = ctx.protocol_packet_counts
+
+    signals = ProtocolSignals(
+        zeek_log_dir=log_dir_str,
+        logs_available=available_logs(log_dir_str),
+    )
+
+    # Merge all computed dicts into the dataclass
+    def _merge(d: dict) -> None:
+        for k, v in d.items():
+            if hasattr(signals, k):
+                setattr(signals, k, v)
+
+    _merge(_dns_signals(dns_df, pc.get("dns", 0)))
+    _merge(_http_signals(http_df, pcap, pc.get("http", 0)))
+    _merge(_tls_signals(ssl_df, pc.get("tls", 0)))
+    _merge(_smb_signals(smb_df, ctx, pc.get("smb2", 0) + pc.get("smb", 0)))
+    _merge(_scan_signals(conn_df, ctx))
+    _merge(_exfil_signals(conn_df, ctx))
+    _merge(_arp_signals(pcap, pc.get("arp", 0)))
+    _merge(_cleartext_creds_signals(pcap))
+    _merge(_kerberos_signals(kerberos_df, pc.get("kerberos", 0)))
+
+    signals.icmp_packet_count = pc.get("icmp", 0)
+    signals.drsuapi_packet_count = pc.get("drsuapi", 0)
+    signals.rdp_packet_count = pc.get("rdp", 0)
+    signals.ldap_packet_count = pc.get("ldap", 0)
+    signals.cldap_packet_count = pc.get("cldap", 0)
+
+    # FTP cleartext flag — promoted from cleartext_proto_list for playbook use
+    signals.ftp_cleartext_detected = "ftp" in signals.cleartext_proto_list
+
+    # ICMP large payload — tshark query for data.len > 512
+    if signals.icmp_packet_count > 0:
+        try:
+            rows = tshark_fields(pcap, "icmp and data.len > 512", "ip.src", "data.len")
+            signals.icmp_large_payload_count = len(rows)
+        except Exception:
+            pass
+
+    # Beacon scoring (RITA-style) — requires conn.log with enough rows
+    try:
+        beacon_candidates = phase2_beacon.run(
+            conn_df,
+            internal_ips=ctx.internal_ips if ctx.internal_ips else None,
+        )
+        signals.beacon_candidates = [vars(b) for b in beacon_candidates]
+        signals.beacon_top_score = beacon_candidates[0].composite_score if beacon_candidates else 0.0
+    except Exception:
+        pass
+
+    return signals

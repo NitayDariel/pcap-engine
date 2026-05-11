@@ -1,0 +1,81 @@
+ttp_id: T1048.001
+name: Exfiltration via DNS TXT Records
+category: exfiltration
+mitre_tactic: TA0010
+mitre_tactic_name: Exfiltration
+confidence_ceiling: HIGH
+required_protocols: [dns]
+
+minimum_presence:
+  dns_packet_count: 10
+
+signals:
+  - id: high_txt_query_ratio
+    description: >
+      >= 5% TXT or NULL query ratio — legitimate DNS rarely uses TXT queries
+      beyond SPF/DKIM lookups. A sustained stream of TXT queries is the primary
+      mechanism for DNS-based exfiltration: data is base64-encoded into the query
+      subdomain, the answer TXT record carries the C2 response.
+    source: dns_txt_null_ratio
+    threshold: ">= 0.05"
+    weight: 0.55
+    threshold_low: ">= 0.02"
+    weight_low: 0.22
+    attack_category: A
+
+  - id: suspicious_parent_domains
+    description: >
+      >= 1 parent domain with > 10 unique subdomains — the core structural signature
+      of DNS exfiltration: data chunks are encoded into subdomains of a single C2
+      domain. Each unique subdomain is a data packet.
+    source: dns_suspicious_parent_count
+    threshold: ">= 1"
+    weight: 0.55
+    attack_category: B
+
+  - id: high_nxdomain_rate
+    description: >
+      >= 20% NXDOMAIN responses — often co-occurs with exfil as the attacker
+      probes domains that don't exist yet, or as malformed exfil packets fail to resolve.
+    source: dns_nxdomain_rate
+    threshold: ">= 0.20"
+    weight: 0.25
+    threshold_low: ">= 0.10"
+    weight_low: 0.10
+    attack_category: A
+
+  - id: high_entropy_subdomains
+    description: >
+      Max subdomain entropy >= 3.8 — data encoded as hex or base64 produces high
+      Shannon entropy in the leftmost label. Random-looking subdomains are the
+      visual signature of encoding-based exfiltration.
+    source: dns_max_subdomain_entropy
+    threshold: ">= 3.8"
+    weight: 0.30
+    threshold_low: ">= 3.0"
+    weight_low: 0.12
+    attack_category: B
+
+combination_bonuses:
+  - signals: [high_txt_query_ratio, suspicious_parent_domains]
+    bonus: 0.20
+    reason: TXT queries + subdomain explosion on one parent = definitive DNS exfil signature
+
+  - signals: [high_entropy_subdomains, suspicious_parent_domains]
+    bonus: 0.15
+    reason: High-entropy subdomains concentrated on one domain confirms encoding-based exfil
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.30
+
+false_positive_notes: >
+  DNS-based VPNs (iodine, dns2tcp) produce similar patterns but for tunneling C2, not
+  exfil — see T1071.004 for the tunneling variant. SPF/DMARC record lookups produce
+  TXT queries but from mail servers, not workstations. Check: is the querying host a
+  mail server or a workstation?
+
+references:
+  - "MITRE ATT&CK T1048.001"
+  - "https://attack.mitre.org/techniques/T1048/001/"
+  - "dnscat2, iodine, dns2tcp as common DNS exfil tools"

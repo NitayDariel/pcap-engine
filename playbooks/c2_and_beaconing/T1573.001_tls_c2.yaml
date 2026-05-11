@@ -1,0 +1,66 @@
+ttp_id: T1573.001
+name: Encrypted Channel — TLS C2 (Invalid/No SNI)
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: HIGH
+required_protocols: [tls]
+
+minimum_presence:
+  tls_packet_count: 10
+
+signals:
+  - id: missing_sni_sessions
+    description: >
+      >= 5 TLS sessions with no Server Name Indication. Legitimate browsers and
+      apps always send SNI. Absent SNI indicates a raw TCP→TLS implementation —
+      the signature of custom C2 implants (Cobalt Strike default profile,
+      Sliver, Metasploit reverse_https with no host setting).
+    source: tls_missing_sni_count
+    threshold: ">= 5"
+    weight: 0.55
+    threshold_low: ">= 2"
+    weight_low: 0.25
+    attack_category: A
+
+  - id: cert_anomalies
+    description: >
+      >= 3 TLS certificate validation failures (self-signed, expired, wrong host).
+      C2 operators rarely purchase legitimate certs for their infrastructure.
+      Self-signed certs are the default for most C2 frameworks.
+    source: tls_cert_anomaly_count
+    threshold: ">= 3"
+    weight: 0.50
+    threshold_low: ">= 1"
+    weight_low: 0.20
+    attack_category: B
+
+  - id: high_tls_volume
+    description: >
+      >= 500 TLS packets — sustained high-volume encrypted channel may be active
+      C2 communication or encrypted data exfiltration.
+    source: tls_packet_count
+    threshold: ">= 500"
+    weight: 0.20
+    attack_category: A
+
+combination_bonuses:
+  - signals: [missing_sni_sessions, cert_anomalies]
+    bonus: 0.20
+    reason: No SNI + bad certs is the textbook implant TLS fingerprint
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.30
+
+false_positive_notes: >
+  IoT devices, embedded systems, and old Java applications often omit SNI.
+  Internal services may use self-signed certs legitimately.
+  Install Zeek JA3 package to fingerprint TLS client hellos against known C2 hashes —
+  this is the definitive confirmation step that this playbook cannot currently perform.
+
+references:
+  - "MITRE ATT&CK T1573.001"
+  - "https://attack.mitre.org/techniques/T1573/001/"
+  - "JA3/JA3S TLS fingerprinting for C2 detection"
+  - "Cobalt Strike default TLS profile analysis"

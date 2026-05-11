@@ -1,0 +1,39 @@
+# Known-good patterns — cleared at Phase 0 before any TTP scoring.
+# Add environment-specific entries below the defaults.
+
+ntp_servers:
+  - 216.239.35.0/24     # time.google.com
+  - 17.253.0.0/16       # time.apple.com
+  - 40.119.6.0/24       # time.windows.com
+
+update_servers:
+  domains:
+    - "update.microsoft.com"
+    - "windowsupdate.com"
+    - "apple.com"
+    - "icloud.com"
+    - "ocsp.apple.com"
+    - "push.apple.com"
+    - "googleapis.com"
+    - "gstatic.com"
+  ips: []
+
+cdn_ranges:
+  - 104.16.0.0/12       # Cloudflare
+  - 172.64.0.0/13       # Cloudflare
+  - 13.32.0.0/15        # AWS CloudFront
+  - 99.84.0.0/16        # AWS CloudFront
+  - 23.0.0.0/8          # Akamai (broad — use carefully)
+
+certificate_authorities:
+  - "ocsp.digicert.com"
+  - "ocsp.sectigo.com"
+  - "crl.comodoca.com"
+  - "r3.o.lencr.org"    # Let's Encrypt OCSP
+
+local_protocols_to_clear:
+  - mdns
+  - llmnr
+  - ssdp
+  - nbns
+  - dhcp

@@ -1,0 +1,65 @@
+ttp_id: T1056.003
+name: Web Portal Credential Capture
+category: credential_access
+mitre_tactic: TA0006
+mitre_tactic_name: Credential Access
+confidence_ceiling: HIGH
+required_protocols: [http]
+
+minimum_presence:
+  http_packet_count: 10
+
+signals:
+  - id: cleartext_http_credentials
+    description: >
+      HTTP Basic Auth credentials observed in cleartext — credentials submitted
+      via HTTP (not HTTPS) are visible in the PCAP payload. This confirms credential
+      exposure regardless of whether the portal is legitimate or attacker-controlled.
+    source: http_cleartext_creds_detected
+    threshold: "== True"
+    weight: 0.65
+    attack_category: A
+
+  - id: high_post_to_cleartext
+    description: >
+      >= 50 HTTP POST over cleartext — form submissions over HTTP (not HTTPS) expose
+      credential fields. High volume suggests automated credential harvesting via
+      a phishing portal or intercepting proxy.
+    source: http_plaintext_post_count
+    threshold: ">= 50"
+    weight: 0.45
+    threshold_low: ">= 10"
+    weight_low: 0.18
+    attack_category: B
+
+  - id: low_user_agent_diversity
+    description: >
+      <= 2 unique user agents — scripted credential capture tools use a fixed or
+      no user agent. Legitimate web portal traffic involves many browser variants.
+    source: http_unique_user_agent_count
+    threshold: "<= 2"
+    weight: 0.30
+    attack_category: B
+
+combination_bonuses:
+  - signals: [cleartext_http_credentials, high_post_to_cleartext]
+    bonus: 0.15
+    reason: Confirmed cleartext creds + high POST volume = active credential harvesting
+
+  - signals: [high_post_to_cleartext, low_user_agent_diversity]
+    bonus: 0.10
+    reason: High-volume POST with static UA is an automated harvest/spray pattern
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.30
+
+false_positive_notes: >
+  Legacy internal applications often use HTTP Basic Auth legitimately (printer web UIs,
+  network device admin panels). High POST volume may be a monitoring agent or backup.
+  Check: is the destination IP an internal device or external? Internal-only credential
+  exposure is lower severity but still a misconfiguration finding.
+
+references:
+  - "MITRE ATT&CK T1056.003"
+  - "https://attack.mitre.org/techniques/T1056/003/"

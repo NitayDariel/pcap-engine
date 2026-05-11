@@ -1,0 +1,41 @@
+ttp_id: T1110.001
+name: Kerberos Credential Brute Force
+category: credential_access
+mitre_tactic: TA0006
+mitre_tactic_name: Credential Access
+confidence_ceiling: HIGH
+required_protocols: [kerberos]
+
+minimum_presence:
+  kerberos_packet_count: 1
+
+signals:
+  - id: preauth_failures
+    description: >
+      >= 10 KDC_ERR_PREAUTH_FAILED errors — each failed pre-authentication attempt
+      indicates a wrong password. A burst of these is a credential spray or brute force.
+    source: kerberos_preauth_failed_count
+    threshold: ">= 10"
+    weight: 0.70
+    attack_category: A
+
+  - id: high_tgs_volume_no_preauth
+    description: >
+      High TGS request volume — spraying tools often probe many accounts rapidly.
+    source: kerberos_tgs_req_count
+    threshold: ">= 30"
+    weight: 0.30
+    attack_category: B
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.30
+
+false_positive_notes: >
+  Misconfigured clients with expired or wrong passwords will generate pre-auth failures.
+  Check: is the failure count from a single source IP? Is it sustained or a short burst?
+  A single machine with >50 failures is almost certainly malicious.
+
+references:
+  - "MITRE ATT&CK T1110.001"
+  - "https://attack.mitre.org/techniques/T1110/001/"

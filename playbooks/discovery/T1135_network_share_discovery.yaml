@@ -1,0 +1,62 @@
+ttp_id: T1135
+name: Network Share Discovery
+category: discovery
+mitre_tactic: TA0007
+mitre_tactic_name: Discovery
+confidence_ceiling: HIGH
+required_protocols: [smb]
+
+minimum_presence:
+  smb_packet_count: 1
+
+signals:
+  - id: admin_share_enumeration
+    description: >
+      Admin shares accessed (IPC$, ADMIN$, C$) — IPC$ in particular is used
+      by attackers to enumerate available shares before staging files or executing
+      remotely. Accessing IPC$ + ADMIN$ in sequence is the share discovery pattern.
+    source: smb_admin_share_detected
+    threshold: "== True"
+    weight: 0.55
+    attack_category: A
+
+  - id: multiple_smb_targets
+    description: >
+      >= 2 unique internal hosts accessed via SMB — scanning shares across
+      multiple hosts indicates systematic enumeration, not targeted file access.
+    source: smb_lateral_host_count
+    threshold: ">= 2"
+    weight: 0.45
+    threshold_low: ">= 1"
+    weight_low: 0.20
+    attack_category: B
+
+  - id: high_smb_volume
+    description: >
+      >= 200 SMB packets — sustained SMB volume beyond a single file transfer
+      is consistent with enumeration and staging activity.
+    source: smb_packet_count
+    threshold: ">= 200"
+    weight: 0.20
+    threshold_low: ">= 50"
+    weight_low: 0.08
+    attack_category: A
+
+combination_bonuses:
+  - signals: [admin_share_enumeration, multiple_smb_targets]
+    bonus: 0.15
+    reason: Admin shares accessed on multiple hosts = active share enumeration campaign
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.25
+
+false_positive_notes: >
+  Group Policy processing (SYSVOL) and DFS always access IPC$ and admin shares
+  legitimately. SCCM, PDQ Deploy, and patch management tools also hit admin shares.
+  The distinction is the source: a regular workstation hitting multiple hosts' admin
+  shares is suspicious; a known management server is expected.
+
+references:
+  - "MITRE ATT&CK T1135"
+  - "https://attack.mitre.org/techniques/T1135/"

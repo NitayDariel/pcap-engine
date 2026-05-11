@@ -1,0 +1,52 @@
+ttp_id: T1021.001
+name: Remote Desktop Protocol Lateral Movement
+category: lateral_movement
+mitre_tactic: TA0008
+mitre_tactic_name: Lateral Movement
+confidence_ceiling: HIGH
+required_protocols: [rdp]
+
+minimum_presence:
+  rdp_packet_count: 1
+
+signals:
+  - id: rdp_traffic
+    description: >
+      >= 50 RDP packets — RDP (port 3389) is the primary interactive remote access
+      vector for Windows lateral movement. Legitimate admin RDP from known jump hosts
+      is expected; RDP from workstations to other workstations is unusual and suspicious.
+    source: rdp_packet_count
+    threshold: ">= 50"
+    weight: 0.55
+    threshold_low: ">= 10"
+    weight_low: 0.25
+    attack_category: A
+
+  - id: smb_combined_with_rdp
+    description: >
+      SMB admin share access in the same capture — attackers often combine RDP
+      lateral movement with SMB file staging. Simultaneous RDP + SMB admin access
+      from the same host is a strong lateral movement pattern.
+    source: smb_admin_share_detected
+    threshold: "== True"
+    weight: 0.45
+    attack_category: B
+
+combination_bonuses:
+  - signals: [rdp_traffic, smb_combined_with_rdp]
+    bonus: 0.15
+    reason: RDP + SMB admin shares from same host is the classic hands-on-keyboard lateral movement pattern
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.30
+
+false_positive_notes: >
+  IT administrators using RDP for remote management generate identical traffic.
+  Check: is the source host a known admin workstation or jump server?
+  RDP from a regular user workstation to another workstation is HIGH suspicion.
+  RDP to a DC from a non-admin host is near-CONFIRMED lateral movement.
+
+references:
+  - "MITRE ATT&CK T1021.001"
+  - "https://attack.mitre.org/techniques/T1021/001/"

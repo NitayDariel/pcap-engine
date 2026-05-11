@@ -1,0 +1,63 @@
+ttp_id: T1558.003
+name: Kerberoasting
+category: credential_access
+mitre_tactic: TA0006
+mitre_tactic_name: Credential Access
+confidence_ceiling: CONFIRMED
+required_protocols: [kerberos]
+
+minimum_presence:
+  kerberos_packet_count: 1
+
+signals:
+  - id: high_tgs_req_count
+    description: >
+      >= 20 TGS-REQ tickets requested — attackers request many service tickets
+      to crack offline. Legitimate users rarely need more than a handful.
+    source: kerberos_tgs_req_count
+    threshold: ">= 20"
+    weight: 0.50
+    attack_category: A
+
+  - id: rc4_tgs_tickets
+    description: >
+      RC4-HMAC encrypted TGS tickets requested — RC4 is weak and crackable offline
+      (hashcat -m 13100). AES tickets are not practical to crack. Any RC4 TGS in a
+      modern AD environment is a strong Kerberoasting indicator.
+    source: kerberos_rc4_tgs_count
+    threshold: ">= 1"
+    weight: 0.60
+    attack_category: B
+
+  - id: many_unique_spns
+    description: >
+      >= 5 unique SPNs targeted — Kerberoasting tools enumerate all roastable accounts
+      and request a ticket for each. Legitimate access involves a small fixed set.
+    source: kerberos_unique_spn_count
+    threshold: ">= 5"
+    weight: 0.40
+    attack_category: A
+
+combination_bonuses:
+  - signals: [rc4_tgs_tickets, high_tgs_req_count]
+    bonus: 0.20
+    reason: RC4 tickets + high volume is textbook Kerberoasting
+
+  - signals: [rc4_tgs_tickets, many_unique_spns]
+    bonus: 0.15
+    reason: RC4 targeting multiple accounts strongly suggests automated enumeration
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.35
+
+false_positive_notes: >
+  Legacy applications that only support RC4 may legitimately request RC4 TGS tickets.
+  Verify whether the requesting host is a known legacy system. Also check if the
+  requesting account is a service account vs user account — user accounts requesting
+  many service tickets is more suspicious.
+
+references:
+  - "MITRE ATT&CK T1558.003"
+  - "https://attack.mitre.org/techniques/T1558/003/"
+  - "Harmj0y: Kerberoasting Without Mimikatz"

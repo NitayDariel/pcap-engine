@@ -1,0 +1,53 @@
+ttp_id: T1003.006
+name: DCSync — Active Directory Credential Replication
+category: credential_access
+mitre_tactic: TA0006
+mitre_tactic_name: Credential Access
+confidence_ceiling: CONFIRMED
+required_protocols: [drsuapi]
+
+minimum_presence:
+  drsuapi_packet_count: 1
+
+signals:
+  - id: drsuapi_traffic
+    description: >
+      MS-DRSR (Directory Replication Service Remote Protocol) traffic observed from a
+      non-DC host. DCSync abuses legitimate AD replication by simulating a domain
+      controller pulling password hashes via DRS. Any drsuapi traffic from a workstation
+      or member server is nearly always malicious — only DCs replicate using this protocol.
+    source: drsuapi_packet_count
+    threshold: ">= 1"
+    weight: 0.80
+    threshold_low: ">= 1"
+    weight_low: 0.80
+    attack_category: A
+
+  - id: smb_lateral_present
+    description: >
+      Internal SMB lateral movement in the same capture — attackers commonly combine
+      DCSync with lateral movement to use extracted hashes (Pass-the-Hash).
+    source: smb_lateral_host_count
+    threshold: ">= 1"
+    weight: 0.30
+    attack_category: B
+
+combination_bonuses:
+  - signals: [drsuapi_traffic, smb_lateral_present]
+    bonus: 0.15
+    reason: DCSync + lateral SMB = classic credential theft + movement chain
+
+score_thresholds:
+  deep_dive: 0.70
+  report: 0.50
+
+false_positive_notes: >
+  Legitimate DCSync traffic only occurs between domain controllers during AD replication.
+  If the source IP is a known secondary DC, this is benign replication — verify source
+  against your DC list. Non-DC hosts running drsuapi are ALWAYS suspicious.
+
+references:
+  - "MITRE ATT&CK T1003.006"
+  - "https://attack.mitre.org/techniques/T1003/006/"
+  - "Mimikatz lsadump::dcsync — the most common DCSync tool"
+  - "Sean Metcalf: Active Directory Security Basics"

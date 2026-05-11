@@ -1,0 +1,66 @@
+ttp_id: T1071.004
+name: DNS Tunneling
+category: c2_and_beaconing
+mitre_tactic: TA0010
+mitre_tactic_name: Exfiltration
+confidence_ceiling: HIGH
+required_protocols: [dns]
+
+minimum_presence:
+  dns_packet_count: 50
+
+signals:
+  - id: suspicious_parent_domains
+    description: Parent domains with more than 10 unique subdomain FQDNs (encoding indicator)
+    source: dns_suspicious_parent_count
+    threshold: ">= 1"
+    weight: 0.45
+    attack_category: C
+
+  - id: long_avg_query_length
+    description: Average DNS query length >= 40 chars (data stuffed in subdomains)
+    source: dns_avg_query_length
+    threshold: ">= 40"
+    weight: 0.40
+    attack_category: B
+
+  - id: high_txt_null_ratio
+    description: TXT or NULL query ratio >= 20% of DNS traffic (tunnel transport types)
+    source: dns_txt_null_ratio
+    threshold: ">= 0.20"
+    weight: 0.35
+    attack_category: B
+
+  - id: high_subdomain_entropy
+    description: Maximum subdomain Shannon entropy >= 3.5 bits (random-looking encoded data)
+    source: dns_max_subdomain_entropy
+    threshold: ">= 3.5"
+    weight: 0.35
+    attack_category: B
+
+  - id: high_nxdomain_rate
+    description: NXDOMAIN rate >= 30% (tunnel probing / DGA pattern)
+    source: dns_nxdomain_rate
+    threshold: ">= 0.30"
+    weight: 0.25
+    attack_category: B
+
+combination_bonuses:
+  - signals: [suspicious_parent_domains, long_avg_query_length]
+    bonus: 0.20
+    reason: High FQDN diversity AND long queries rarely coexist in legitimate traffic
+
+score_thresholds:
+  deep_dive: 0.60
+  report: 0.35
+
+false_positive_notes: >
+  Cloudflare Workers and CDN edge deployments generate high unique FQDN counts.
+  Reduce score by 0.25 if parent domain is a known CDN provider.
+  CDN queries tend to be consistent-length; tunnel queries have variable-length subdomains.
+
+references:
+  - "RITA DNS Tunneling module — activecm.github.io"
+  - "MITRE ATT&CK T1071.004"
+  - "iodine: code.kryo.se/iodine"
+  - "dnscat2: github.com/iagox86/dnscat2"

@@ -1,0 +1,58 @@
+ttp_id: T1071.001
+name: HTTP C2 Beaconing
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: HIGH
+required_protocols: [http]
+
+minimum_presence:
+  http_packet_count: 10
+
+signals:
+  - id: high_post_volume
+    description: >
+      >= 100 HTTP POST requests over cleartext — C2 implants upload task results,
+      keylogger data, and screenshots via POST. High POST volume without a known
+      application context is suspicious.
+    source: http_plaintext_post_count
+    threshold: ">= 100"
+    weight: 0.40
+    attack_category: A
+
+  - id: low_user_agent_diversity
+    description: >
+      <= 2 unique User-Agent strings across HTTP sessions — legitimate browser/OS
+      traffic mixes many user agents. A single static UA is a C2 beacon signature
+      (many frameworks use a hardcoded UA or none at all).
+    source: http_unique_user_agent_count
+    threshold: "<= 2"
+    weight: 0.45
+    attack_category: B
+
+  - id: cleartext_creds_in_http
+    description: HTTP Basic Auth credentials observed in cleartext — credential exposure risk.
+    source: http_cleartext_creds_detected
+    threshold: "== True"
+    weight: 0.30
+    attack_category: C
+
+combination_bonuses:
+  - signals: [high_post_volume, low_user_agent_diversity]
+    bonus: 0.20
+    reason: High POST volume + static user agent is the classic HTTP C2 beacon pattern
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.30
+
+false_positive_notes: >
+  IoT devices and embedded systems often use a fixed user agent. Single-purpose
+  applications (monitoring agents, update clients) may POST frequently to one endpoint.
+  Check: does the POST destination vary (C2 rotation) or is it always the same host?
+  Uniform inter-request timing is a stronger beacon indicator than POST count alone.
+
+references:
+  - "MITRE ATT&CK T1071.001"
+  - "https://attack.mitre.org/techniques/T1071/001/"
+  - "RITA HTTP beacon scoring methodology"

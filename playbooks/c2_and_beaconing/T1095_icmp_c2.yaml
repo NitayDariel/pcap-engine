@@ -1,0 +1,49 @@
+ttp_id: T1095
+name: ICMP C2 Covert Channel
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: HIGH
+required_protocols: [icmp]
+
+minimum_presence:
+  icmp_packet_count: 10
+
+signals:
+  - id: high_icmp_volume
+    description: >
+      >= 500 ICMP packets — legitimate ICMP is diagnostic (ping, traceroute) and
+      short-lived. Sustained high-volume ICMP is a strong indicator of data tunneling.
+    source: icmp_packet_count
+    threshold: ">= 500"
+    weight: 0.45
+    attack_category: A
+
+  - id: large_icmp_payloads
+    description: >
+      >= 5 ICMP packets with payloads > 512 bytes — standard ping uses 56 bytes.
+      Oversized ICMP payloads are the primary mechanism for ICMP tunneling (ptunnel,
+      icmptunnel, Hans). Tools embed TCP data inside ICMP echo request/reply pairs.
+    source: icmp_large_payload_count
+    threshold: ">= 5"
+    weight: 0.65
+    attack_category: B
+
+combination_bonuses:
+  - signals: [high_icmp_volume, large_icmp_payloads]
+    bonus: 0.20
+    reason: Volume + oversized payloads together is the ICMP tunneling signature
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.30
+
+false_positive_notes: >
+  Network monitoring tools (MTR, smokeping) generate sustained ICMP but with standard
+  56-byte payloads. VPN probe tools may use jumbo ICMP. Check payload size distribution
+  and whether replies match requests — tunneling shows asymmetric timing patterns.
+
+references:
+  - "MITRE ATT&CK T1095"
+  - "https://attack.mitre.org/techniques/T1095/"
+  - "ICMP Tunneling: ptunnel, icmptunnel, Hans"

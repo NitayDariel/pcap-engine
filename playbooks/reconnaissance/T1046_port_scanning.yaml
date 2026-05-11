@@ -1,0 +1,63 @@
+ttp_id: T1046
+name: Network Port Scan
+category: reconnaissance
+mitre_tactic: TA0007
+mitre_tactic_name: Discovery
+confidence_ceiling: HIGH
+required_protocols: [tcp]
+
+minimum_presence:
+  dns_packet_count: 0
+  scan_candidate_count: 0
+
+signals:
+  - id: high_unique_dst_ports
+    description: Single source contacting >= 15 unique destination ports (port sweep)
+    source: scan_max_unique_dst_ports
+    threshold: ">= 15"
+    weight: 0.55
+    attack_category: A
+
+  - id: many_unique_dst_hosts
+    description: Single source contacting >= 10 unique destination hosts (host sweep)
+    source: scan_max_unique_dst_hosts
+    threshold: ">= 10"
+    weight: 0.45
+    attack_category: A
+
+  - id: multiple_scan_sources
+    description: More than 1 host exhibiting scanning behavior simultaneously
+    source: scan_candidate_count
+    threshold: ">= 2"
+    weight: 0.20
+    attack_category: A
+
+  - id: syn_only_connections
+    description: >
+      >= 150 SYN-only connections (state S0/REJ/RSTO) — real scanners leave many
+      unanswered SYNs; Windows telemetry and normal traffic almost never does.
+    source: scan_syn_only_connection_count
+    threshold: ">= 150"
+    weight: 0.25
+    threshold_low: ">= 40"
+    weight_low: 0.10
+    attack_category: B
+
+combination_bonuses:
+  - signals: [high_unique_dst_ports, many_unique_dst_hosts]
+    bonus: 0.15
+    reason: Combined port and host sweep is a strong indicator of automated scanning
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.35
+
+false_positive_notes: >
+  Network management tools (SNMP, Nessus, SCCM inventory) generate similar patterns.
+  Check: is the source IP a known management host? Is traffic limited to specific service ports?
+  Internal → internal scanning is higher confidence than internal → external.
+
+references:
+  - "MITRE ATT&CK T1046"
+  - "SANS Threat Hunting: Port Scan Detection"
+  - "nmap scanning signatures"

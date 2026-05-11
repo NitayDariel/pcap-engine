@@ -1,0 +1,33 @@
+# Secrets
+.env
+.env.*
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Analysis outputs (large, may contain PII)
+outputs/
+
+# PCAPs — never commit binary captures
+*.pcap
+*.pcapng
+*.cap
+tests/known_pcaps/
+
+# Downloaded rule sets (fetched on demand)
+sigma/
+suricata_rules/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

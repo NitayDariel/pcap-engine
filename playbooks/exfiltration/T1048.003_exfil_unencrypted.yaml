@@ -1,0 +1,44 @@
+ttp_id: T1048.003
+name: Exfiltration Over Unencrypted Channel
+category: exfiltration
+mitre_tactic: TA0010
+mitre_tactic_name: Exfiltration
+confidence_ceiling: MEDIUM
+required_protocols: [http]
+
+minimum_presence:
+  http_packet_count: 1
+
+signals:
+  - id: large_outbound_transfer
+    description: Internal host sent > 10MB over non-encrypted channel to external IP
+    source: max_outbound_bytes
+    threshold: ">= 10000000"
+    weight: 0.55
+    attack_category: D
+
+  - id: plaintext_post_activity
+    description: HTTP POST requests present (data submission over cleartext)
+    source: http_plaintext_post_count
+    threshold: ">= 5"
+    weight: 0.35
+    attack_category: D
+
+combination_bonuses:
+  - signals: [large_outbound_transfer, plaintext_post_activity]
+    bonus: 0.15
+    reason: Large volume + POST method over cleartext strongly suggests data exfiltration
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.35
+
+false_positive_notes: >
+  Large HTTP downloads (Windows Update, media streaming) generate large transfer volumes.
+  Check: is the traffic INBOUND (download) or OUTBOUND (upload)?
+  orig_bytes (what the internal host sent) is the relevant metric, not resp_bytes.
+  Confidence ceiling is MEDIUM — TLS content opacity means we cannot read the payload.
+
+references:
+  - "MITRE ATT&CK T1048.003"
+  - "SANS: Detecting Data Exfiltration via Network Traffic"

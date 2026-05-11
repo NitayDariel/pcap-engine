@@ -1,0 +1,93 @@
+ttp_id: T1071
+name: C2 Beaconing (Periodic Callback)
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: HIGH
+required_protocols: [tcp, udp]
+
+minimum_presence:
+  beacon_top_score: 0
+
+signals:
+  - id: high_composite_beacon
+    description: >
+      Composite beacon score >= 0.75 — RITA-style 4-factor analysis found a
+      host making statistically regular, persistent connections to an external IP.
+      The composite score is the geometric mean of: interval consistency (jitter),
+      payload-size consistency, histogram frequency (fraction near modal interval),
+      and session persistence (hours of continuous beaconing). A score >= 0.75
+      means ALL four factors aligned — this is the gold-standard C2 beacon signature.
+    source: beacon_top_score
+    threshold: ">= 0.75"
+    weight: 0.80
+    attack_category: A
+
+  - id: moderate_composite_beacon
+    description: >
+      Composite beacon score >= 0.60 — three of four factors aligned. Likely
+      beaconing with some variation (e.g. jitter added by implant to evade
+      detection). Warrants investigation even if not fully confident.
+    source: beacon_top_score
+    threshold: ">= 0.60"
+    weight: 0.55
+    threshold_low: ">= 0.50"
+    weight_low: 0.30
+    attack_category: A
+
+  - id: beacon_with_tls_anomaly
+    description: >
+      Beaconing activity co-occurring with TLS missing SNI — the beacon is
+      using raw TLS without an SNI extension, consistent with a C2 implant
+      making encrypted callbacks rather than legitimate browser traffic.
+    source: tls_missing_sni_count
+    threshold: ">= 1"
+    weight: 0.35
+    attack_category: B
+
+  - id: beacon_with_dns_c2
+    description: >
+      Beaconing activity co-occurring with suspicious DNS parent domains —
+      two-channel C2: one channel via periodic TCP/TLS beaconing, a second via
+      DNS tunneling. This multi-channel pattern is used by Cobalt Strike, Sliver,
+      and Havoc C2 frameworks.
+    source: dns_suspicious_parent_count
+    threshold: ">= 1"
+    weight: 0.30
+    attack_category: B
+
+combination_bonuses:
+  - signals: [high_composite_beacon, beacon_with_tls_anomaly]
+    bonus: 0.15
+    reason: High-confidence beacon + TLS without SNI = encrypted C2 implant callback
+
+  - signals: [moderate_composite_beacon, beacon_with_dns_c2]
+    bonus: 0.10
+    reason: Periodic beacon + DNS anomalies = multi-channel fallback C2 architecture
+
+  - signals: [high_composite_beacon, beacon_with_dns_c2]
+    bonus: 0.15
+    reason: High-confidence beacon + suspicious DNS = two confirmed C2 channels active
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.30
+
+false_positive_notes: >
+  Legitimate software that makes regular check-ins can trigger this: Windows Update,
+  Endpoint Detection & Response (EDR) agents, backup clients, and monitoring daemons
+  all make periodic outbound connections. Key discriminators:
+  (1) Legitimate software uses SNI in TLS — C2 implants often omit it.
+  (2) Legitimate software connects to known CDN IPs — cross-reference with IOC enrichment.
+  (3) EDR/AV beacons are normally to the same vendor domain — check dns_top_domains.
+  (4) Check whether the beaconing host is a server (expected) or a workstation (suspicious).
+  RITA 4-factor composite >= 0.75 from a workstation to an unknown external IP is
+  genuinely high-confidence — this threshold was tuned to produce <5% FP rate.
+
+references:
+  - "MITRE ATT&CK T1071"
+  - "https://attack.mitre.org/techniques/T1071/"
+  - "RITA: Real Intelligence Threat Analytics — github.com/activecm/rita"
+  - "RITA 4-factor beacon scoring: interval jitter, size consistency, frequency, duration"
+  - "Cobalt Strike default beacon: 60s interval, JA3: 72a7c4bb76fbfc83e6e9fa1e4de29bef"
+  - "Sliver C2: configurable interval with ±30% jitter by default"

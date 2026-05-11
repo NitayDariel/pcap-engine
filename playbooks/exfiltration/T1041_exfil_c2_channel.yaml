@@ -1,0 +1,63 @@
+ttp_id: T1041
+name: Exfiltration Over C2 Channel (Encrypted)
+category: exfiltration
+mitre_tactic: TA0010
+mitre_tactic_name: Exfiltration
+confidence_ceiling: HIGH
+required_protocols: [tls]
+
+minimum_presence:
+  tls_packet_count: 50
+
+signals:
+  - id: large_encrypted_outbound
+    description: >
+      >= 5 MB of outbound data to an external host — when the channel is TLS-encrypted,
+      payload visibility is lost but volume anomaly is still detectable. Legitimate
+      browser TLS sessions rarely sustain multi-MB uploads without user interaction.
+    source: max_outbound_bytes
+    threshold: ">= 5000000"
+    weight: 0.55
+    threshold_low: ">= 1000000"
+    weight_low: 0.25
+    attack_category: A
+
+  - id: high_tls_volume
+    description: >
+      >= 1000 TLS packets — high-volume encrypted channel is a prerequisite for
+      meaningful exfiltration over TLS. This alone is not sufficient but required.
+    source: tls_packet_count
+    threshold: ">= 1000"
+    weight: 0.35
+    threshold_low: ">= 300"
+    weight_low: 0.15
+    attack_category: A
+
+  - id: tls_cert_anomaly
+    description: >
+      >= 1 TLS certificate validation failure on a high-traffic destination —
+      attackers frequently use self-signed certs on exfil servers. A large data
+      transfer to a host with cert issues is a strong combined indicator.
+    source: tls_cert_anomaly_count
+    threshold: ">= 1"
+    weight: 0.30
+    attack_category: B
+
+combination_bonuses:
+  - signals: [large_encrypted_outbound, tls_cert_anomaly]
+    bonus: 0.15
+    reason: Large encrypted upload to a host with a bad cert is a strong exfil pattern
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.30
+
+false_positive_notes: >
+  Cloud backup agents (BackBlaze, Carbonite, OneDrive) produce large sustained TLS
+  uploads. Video conferencing uploads large media over TLS. Check: is the destination
+  IP a known cloud provider? Is the transfer time-of-day consistent with legitimate use?
+  Persistent multi-MB transfers to unknown IPs at off-hours are high suspicion.
+
+references:
+  - "MITRE ATT&CK T1041"
+  - "https://attack.mitre.org/techniques/T1041/"

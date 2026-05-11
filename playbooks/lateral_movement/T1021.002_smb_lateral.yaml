@@ -1,0 +1,44 @@
+ttp_id: T1021.002
+name: SMB / Windows Admin Shares Lateral Movement
+category: lateral_movement
+mitre_tactic: TA0008
+mitre_tactic_name: Lateral Movement
+confidence_ceiling: HIGH
+required_protocols: [smb, smb2]
+
+minimum_presence:
+  smb_packet_count: 5
+
+signals:
+  - id: admin_share_access
+    description: Access to ADMIN$, C$, or IPC$ shares (privileged access indicators)
+    source: smb_admin_share_detected
+    threshold: "== True"
+    weight: 0.60
+    attack_category: D
+
+  - id: lateral_smb_hosts
+    description: Multiple distinct internal hosts targeted via SMB
+    source: smb_lateral_host_count
+    threshold: ">= 2"
+    weight: 0.45
+    attack_category: D
+
+combination_bonuses:
+  - signals: [admin_share_access, lateral_smb_hosts]
+    bonus: 0.20
+    reason: Admin share access across multiple internal hosts is a strong lateral movement indicator
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.35
+
+false_positive_notes: >
+  Domain controllers legitimately use IPC$ and ADMIN$ for management.
+  Check: is the source IP a domain controller or management server?
+  Pass-the-hash movement shows NTLM auth before SMB access — correlate with kerberos.log.
+
+references:
+  - "MITRE ATT&CK T1021.002"
+  - "Active Countermeasures SMB detection guidance"
+  - "SANS: Detecting Pass-the-Hash via SMB"

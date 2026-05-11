@@ -1,0 +1,15 @@
+services:
+  rita:
+    image: activecm/rita:latest
+    container_name: rita
+    restart: unless-stopped
+    volumes:
+      - rita_data:/var/lib/rita
+      - ../zeek_logs:/zeek_logs:ro
+    ports:
+      - "4380:4380"
+    environment:
+      - RITA_LOG_LEVEL=info
+
+volumes:
+  rita_data:

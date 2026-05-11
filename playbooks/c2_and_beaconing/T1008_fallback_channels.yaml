@@ -1,0 +1,75 @@
+ttp_id: T1008
+name: Fallback C2 Channels (Multi-Protocol)
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: HIGH
+required_protocols: [dns]
+
+minimum_presence:
+  dns_packet_count: 0
+
+signals:
+  - id: dns_c2_indicator
+    description: >
+      >= 1 parent domain with suspicious subdomain diversity — DNS is used as the
+      primary or fallback C2 channel. Presence of this indicator alongside other
+      protocol anomalies confirms multi-channel C2 architecture.
+    source: dns_suspicious_parent_count
+    threshold: ">= 1"
+    weight: 0.40
+    threshold_low: ">= 1"
+    weight_low: 0.40
+    attack_category: A
+
+  - id: tls_c2_indicator
+    description: >
+      >= 2 TLS sessions missing SNI — TLS without SNI is the signature of a C2
+      implant using raw TCP+TLS rather than browser-initiated HTTPS. If this
+      co-occurs with DNS C2 indicators, the implant has multiple active channels.
+    source: tls_missing_sni_count
+    threshold: ">= 2"
+    weight: 0.40
+    threshold_low: ">= 1"
+    weight_low: 0.18
+    attack_category: B
+
+  - id: http_c2_indicator
+    description: >
+      >= 100 HTTP POST requests — high-volume HTTP POST is the HTTP C2 component.
+      When combined with DNS and TLS anomalies, this completes a three-channel
+      redundant C2 architecture (DNS backup, TLS primary, HTTP fallback).
+    source: http_plaintext_post_count
+    threshold: ">= 100"
+    weight: 0.35
+    threshold_low: ">= 30"
+    weight_low: 0.15
+    attack_category: C
+
+combination_bonuses:
+  - signals: [dns_c2_indicator, tls_c2_indicator]
+    bonus: 0.20
+    reason: DNS + TLS C2 indicators simultaneously is a two-channel redundant C2 architecture
+
+  - signals: [dns_c2_indicator, http_c2_indicator]
+    bonus: 0.15
+    reason: DNS + HTTP POST patterns together indicate multi-channel fallback C2
+
+  - signals: [dns_c2_indicator, tls_c2_indicator, http_c2_indicator]
+    bonus: 0.15
+    reason: All three channels active — full redundant C2 stack
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.30
+
+false_positive_notes: >
+  Modern CDNs and cloud applications legitimately use multiple protocols. The key
+  distinguisher is the combination: DNS with unusual subdomain diversity + TLS
+  without SNI + high POST volume from the SAME host at the SAME time.
+  Investigate whether all three anomalies share a common source IP.
+
+references:
+  - "MITRE ATT&CK T1008"
+  - "https://attack.mitre.org/techniques/T1008/"
+  - "Cobalt Strike and modern RATs implement DNS, HTTP, and HTTPS channels"
