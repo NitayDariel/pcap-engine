@@ -45,8 +45,8 @@ def _section(title: str, level: int = 2) -> str:
 # Victim intelligence extraction (DHCP + Kerberos logs)
 # ---------------------------------------------------------------------------
 
-def _extract_victim_details(signals: ProtocolSignals) -> dict:
-    """Pull hostname, MAC, Windows user from Zeek logs."""
+def _extract_victim_details(signals: ProtocolSignals, ctx: AnalysisContext | None = None) -> dict:
+    """Pull hostname, MAC, Windows user from Zeek logs + ARP/mDNS fallbacks."""
     details: dict = {
         "hostname": None,
         "ip": None,
@@ -60,10 +60,9 @@ def _extract_victim_details(signals: ProtocolSignals) -> dict:
 
     log_dir = signals.zeek_log_dir
 
-    # DHCP gives us IP → hostname + MAC
+    # DHCP gives us IP → hostname + MAC (most reliable when present)
     dhcp_df = parse_log(f"{log_dir}/dhcp.log")
     if not dhcp_df.empty:
-        # Take the row with an assigned IP
         for _, row in dhcp_df.iterrows():
             ip = row.get("assigned_addr") or row.get("client_addr")
             if pd.notna(ip) and str(ip) not in ("", "nan"):
@@ -76,14 +75,45 @@ def _extract_victim_details(signals: ProtocolSignals) -> dict:
                     details["domain"] = str(row["domain"])
                 break
 
-    # Kerberos gives us Windows user (client field = "user/DOMAIN")
+    # Kerberos: Windows user and, if DHCP absent, victim IP and domain
     kerb_df = parse_log(f"{log_dir}/kerberos.log")
     if not kerb_df.empty and "client" in kerb_df.columns:
-        clients = kerb_df["client"].dropna()
-        if not clients.empty:
-            raw = str(clients.iloc[0])
-            # "brolf/EASYAS123.TECH" → "brolf"
-            details["windows_user"] = raw.split("/")[0]
+        valid_kerb = kerb_df[kerb_df["client"].notna()]
+        if not valid_kerb.empty:
+            first_row = valid_kerb.iloc[0]
+            raw = str(first_row["client"])
+            parts = raw.split("/")
+            details["windows_user"] = parts[0]
+            # Kerberos realm is uppercase domain (e.g. NEMOTODES.HEALTH → nemotodes.health)
+            if len(parts) > 1 and details["domain"] is None:
+                details["domain"] = parts[1].lower()
+            # If DHCP was absent, use the Kerberos client's source IP as victim IP
+            if details["ip"] is None and "id.orig_h" in valid_kerb.columns:
+                kip = str(first_row.get("id.orig_h", ""))
+                if kip and kip != "nan":
+                    details["ip"] = kip
+
+    # mDNS .local hostname — fallback when DHCP is absent.
+    # Hosts query their own .local name; the leftmost label IS the hostname.
+    if details["hostname"] is None and details["ip"]:
+        dns_df_raw = parse_log(f"{log_dir}/dns.log")
+        if not dns_df_raw.empty and "query" in dns_df_raw.columns and "id.orig_h" in dns_df_raw.columns:
+            local_q = dns_df_raw[
+                dns_df_raw["query"].str.endswith(".local", na=False)
+                & (dns_df_raw["id.orig_h"] == details["ip"])
+            ]
+            if not local_q.empty:
+                fqdn = str(local_q["query"].iloc[0])
+                details["hostname"] = fqdn.removesuffix(".local").split(".")[0]
+
+    # MAC address from ARP → ethernet layer already captured in Phase 1 mac_to_ip map.
+    # No extra PCAP read needed — just reverse the map for the victim IP.
+    if details["mac"] is None and details["ip"] and ctx is not None:
+        victim_ip = details["ip"]
+        for mac, ips in ctx.mac_to_ip.items():
+            if victim_ip in ips:
+                details["mac"] = mac
+                break
 
     return details
 
@@ -119,6 +149,11 @@ def _extract_iocs(
     for t in signals.large_outbound_transfers:
         ip = t.get("id.resp_h", "")
         if ip and ip in ctx.external_ips:
+            ioc_ips.add(ip)
+
+    # HTTP POST destinations — catches C2 that uses many small requests below the byte-volume threshold
+    for ip in getattr(signals, "http_post_destinations", []):
+        if ip in ctx.external_ips:
             ioc_ips.add(ip)
 
     # Confirmed/enriched malicious IPs take priority — always include
@@ -303,7 +338,7 @@ def generate(
     )
 
     # Pre-compute enriched data
-    victim = _extract_victim_details(signals)
+    victim = _extract_victim_details(signals, ctx)
     iocs = _extract_iocs(ctx, signals, ttp_scores, ioc_results)
 
     # ── Header ────────────────────────────────────────────────────────────

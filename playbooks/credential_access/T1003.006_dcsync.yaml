@@ -16,7 +16,9 @@ signals:
       non-DC host. DCSync abuses legitimate AD replication by simulating a domain
       controller pulling password hashes via DRS. Any drsuapi traffic from a workstation
       or member server is nearly always malicious — only DCs replicate using this protocol.
-    source: drsuapi_packet_count
+      The source is identified by excluding hosts that respond to Kerberos (KDCs), so
+      DC-to-DC replication is filtered out before this signal fires.
+    source: drsuapi_attacker_source_count
     threshold: ">= 1"
     weight: 0.80
     threshold_low: ">= 1"

@@ -233,9 +233,9 @@ def run(
     mac_rows = tshark_fields(pcap, "eth.src", "eth.src", "ip.src")
     mac_to_ip: dict[str, list[str]] = {}
     for row in mac_rows:
-        if len(row) >= 3 and row[0] and row[2]:
+        if len(row) >= 2 and row[0] and row[1]:
             mac = row[0]
-            ip = row[2].split(",")[0].strip()
+            ip = row[1].split(",")[0].strip()
             if ip:
                 mac_to_ip.setdefault(mac, [])
                 if ip not in mac_to_ip[mac]:

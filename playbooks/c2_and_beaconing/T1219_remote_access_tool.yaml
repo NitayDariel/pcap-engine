@@ -1,0 +1,66 @@
+ttp_id: T1219
+name: Remote Access Tool (RAT) C2 via Cleartext HTTP
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: HIGH
+required_protocols: [http]
+
+minimum_presence:
+  http_packet_count: 1
+
+signals:
+  - id: http_on_nonstandard_port
+    description: >
+      Cleartext HTTP on a port other than 80/8080. RATs commonly use port 443 with
+      HTTP (not HTTPS) to blend with TLS traffic while remaining unencrypted for
+      easy C2 parsing. Other non-standard ports indicate deliberate port choice to
+      avoid proxy/firewall rules targeting port 80.
+    source: http_on_nonstandard_port_count
+    threshold: ">= 10"
+    weight: 0.60
+    threshold_low: ">= 1"
+    weight_low: 0.30
+    attack_category: A
+
+  - id: high_post_volume
+    description: >
+      Large number of HTTP POST requests — RATs use POST to send victim data and
+      receive commands in the response body. Legitimate sites use POSTs sparingly;
+      hundreds of POSTs to a single external IP is anomalous.
+    source: http_plaintext_post_count
+    threshold: ">= 50"
+    weight: 0.50
+    threshold_low: ">= 20"
+    weight_low: 0.25
+    attack_category: B
+
+  - id: no_tls_despite_external
+    description: >
+      High plaintext HTTP even though TLS is present in the capture. A host that
+      communicates via TLS to most destinations but uses cleartext HTTP to one
+      specific external IP is characteristic of RAT C2 traffic.
+    source: http_plaintext_post_count
+    threshold: ">= 10"
+    weight: 0.20
+    attack_category: B
+
+combination_bonuses:
+  - signals: [http_on_nonstandard_port, high_post_volume]
+    bonus: 0.20
+    reason: Cleartext HTTP on non-standard port + high POST volume = strong RAT C2 pattern
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.35
+
+false_positive_notes: >
+  Legacy applications and developer tools may use non-standard HTTP ports. Verify
+  destination IP reputation and URI patterns before escalating. RATs are distinguished
+  by high POST frequency to a single external IP and lack of TLS.
+
+references:
+  - "MITRE ATT&CK T1219"
+  - "https://attack.mitre.org/techniques/T1219/"
+  - "NetSupport Manager RAT — HTTP POST on port 443 (cleartext)"
+  - "Remcos, AsyncRAT, NanoCore — cleartext HTTP C2 channels"

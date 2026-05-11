@@ -52,6 +52,8 @@ class ProtocolSignals:
     http_cleartext_creds_detected: bool = False
     http_unique_user_agent_count: int = 0
     http_plaintext_post_count: int = 0
+    http_post_destinations: list = field(default_factory=list)  # resp IPs of POST requests
+    http_on_nonstandard_port_count: int = 0                     # cleartext HTTP on non-standard ports
 
     # --- TLS/SSL ---
     tls_packet_count: int = 0
@@ -97,7 +99,8 @@ class ProtocolSignals:
     max_outbound_bytes: int = 0
 
     # --- DCSync / Replication ---
-    drsuapi_packet_count: int = 0   # MS-DRSR protocol (DCSync uses this — near-CONFIRMED T1003.006)
+    drsuapi_packet_count: int = 0              # MS-DRSR total packet count (includes benign DC replication)
+    drsuapi_attacker_source_count: int = 0     # drsuapi from non-DC hosts — true DCSync indicator
 
     # --- FTP ---
     ftp_cleartext_detected: bool = False
@@ -137,6 +140,20 @@ def _subdomain_of(query: str) -> str:
     return query.split(".")[0]
 
 
+def _is_srv_record(fqdn: str) -> bool:
+    """RFC 2782: SRV labels always start with '_' (e.g. _ldap._tcp.dc._msdcs.*). AD infrastructure, not user traffic."""
+    return any(label.startswith("_") for label in fqdn.split("."))
+
+
+def _entropy_eligible(q: str) -> bool:
+    """Entropy is only meaningful for 3+ label subdomains, not apex queries or mDNS .local."""
+    if not isinstance(q, str):
+        return False
+    if q.endswith(".local"):
+        return False
+    return len(q.split(".")) >= 3
+
+
 # ---------------------------------------------------------------------------
 # Per-protocol computation functions
 # ---------------------------------------------------------------------------
@@ -160,19 +177,35 @@ def _dns_signals(dns_df: pd.DataFrame, packet_count: int) -> dict:
         nxdomain = int((dns_df["rcode_name"] == "NXDOMAIN").sum())
         out["dns_nxdomain_rate"] = round(nxdomain / total, 4) if total else 0.0
 
-    # Subdomain entropy
-    entropies = dns_df["query"].dropna().apply(lambda q: _shannon_entropy(_subdomain_of(q)))
+    # Subdomain entropy — exclude mDNS .local and apex-only queries (need 3+ labels for real subdomain)
+    entropies = dns_df["query"].dropna().apply(
+        lambda q: _shannon_entropy(_subdomain_of(q)) if _entropy_eligible(q) else 0.0
+    )
     out["dns_max_subdomain_entropy"] = round(float(entropies.max()), 4) if not entropies.empty else 0.0
 
-    # Parent domains with suspicious subdomain diversity (>10 unique FQDNs per parent)
+    # Parent diversity — exclude RFC 2782 SRV records (_service._proto.*) and mDNS .local
+    # SRV records are AD infrastructure (dozens of unique FQDNs per domain is normal) — not tunneling
     parent_to_fqdns: dict[str, set] = {}
     for q in dns_df["query"].dropna():
+        if not isinstance(q, str):
+            continue
+        if _is_srv_record(q) or q.endswith(".local"):
+            continue
         parts = q.split(".")
         if len(parts) >= 2:
             parent = ".".join(parts[-2:])
             parent_to_fqdns.setdefault(parent, set()).add(q)
 
-    out["dns_suspicious_parent_count"] = sum(1 for v in parent_to_fqdns.values() if len(v) > 10)
+    # A parent is suspicious only if it has both: many unique FQDNs AND long first-labels.
+    # Real DNS tunneling encodes data in first labels (base32/base64: 20-63 chars avg).
+    # Legitimate CDN/SaaS domains have many FQDNs but short human-readable first labels (< 15 chars).
+    def _avg_first_label_len(fqdns: set) -> float:
+        return sum(len(fqdn.split(".")[0]) for fqdn in fqdns) / len(fqdns) if fqdns else 0.0
+
+    out["dns_suspicious_parent_count"] = sum(
+        1 for v in parent_to_fqdns.values()
+        if len(v) > 10 and _avg_first_label_len(v) > 15
+    )
     out["dns_top_domains"] = sorted(
         [(k, len(v)) for k, v in parent_to_fqdns.items()],
         key=lambda x: x[1],
@@ -192,6 +225,9 @@ def _http_signals(http_df: pd.DataFrame, pcap: str, packet_count: int) -> dict:
 
     if "method" in http_df.columns:
         out["http_plaintext_post_count"] = int((http_df["method"] == "POST").sum())
+        if "id.resp_h" in http_df.columns:
+            post_dests = http_df.loc[http_df["method"] == "POST", "id.resp_h"].dropna()
+            out["http_post_destinations"] = [str(ip) for ip in post_dests.unique().tolist()]
 
     # Cleartext credentials — check via tshark (HTTP Basic Auth)
     try:
@@ -479,5 +515,35 @@ def run(
         signals.beacon_top_score = beacon_candidates[0].composite_score if beacon_candidates else 0.0
     except Exception:
         pass
+
+    # DCSync gate: count drsuapi sources that are NOT domain controllers.
+    # DCs are identified by their role as Kerberos responders (port 88).
+    # DC→DC drsuapi is normal AD replication; workstation/server→DC drsuapi = DCSync attack.
+    if signals.drsuapi_packet_count > 0:
+        dc_ips: set[str] = set()
+        if not kerberos_df.empty and "id.resp_h" in kerberos_df.columns:
+            dc_ips.update(str(ip) for ip in kerberos_df["id.resp_h"].dropna())
+        try:
+            drsuapi_rows = tshark_fields(pcap, "drsuapi", "ip.src", "ip.dst")
+            attacker_sources = {
+                row[0] for row in drsuapi_rows
+                if len(row) >= 1 and row[0] and row[0] not in dc_ips
+            }
+            signals.drsuapi_attacker_source_count = len(attacker_sources)
+        except Exception:
+            # Fallback: if tshark fails, treat all drsuapi as potential attacker traffic
+            signals.drsuapi_attacker_source_count = signals.drsuapi_packet_count
+
+    # Cleartext HTTP on non-standard ports (80/8080 are expected; 443 cleartext is a red flag for RATs/C2)
+    if signals.http_packet_count > 0:
+        try:
+            ns_http = tshark_fields(
+                pcap,
+                "http and tcp.dstport != 80 and tcp.dstport != 8080",
+                "ip.src", "ip.dst", "tcp.dstport",
+            )
+            signals.http_on_nonstandard_port_count = len(ns_http)
+        except Exception:
+            pass
 
     return signals
