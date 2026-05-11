@@ -1,0 +1,67 @@
+ttp_id: T1021.006
+name: Remote Services — Windows Remote Management
+category: lateral_movement
+mitre_tactic: TA0008
+mitre_tactic_name: Lateral Movement
+confidence_ceiling: HIGH
+required_protocols: []
+
+# T1021.006 — adversaries use WinRM (Windows Remote Management) for lateral movement.
+# WinRM is a legitimate Microsoft protocol (implementation of WS-Management) used for
+# remote PowerShell sessions and remote command execution.
+#
+# Port 5985 — HTTP/WinRM (unencrypted or HTTP transport)
+# Port 5986 — HTTPS/WinRM (encrypted)
+#
+# Key distinguisher: WinRM is rarely used in typical enterprise environments (disabled
+# by default on workstations). Any WinRM traffic from a non-sysadmin host warrants
+# investigation. Multiple destination hosts confirm lateral movement.
+minimum_presence:
+  winrm_connection_count: 1    # WinRM is unusual enough that even 1 connection warrants a signal
+
+signals:
+  - id: winrm_connections
+    description: >
+      Connections to port 5985 (HTTP/WinRM) or 5986 (HTTPS/WinRM).
+      >= 5 connections = automated lateral movement via remote PowerShell (strong, 0.80);
+      >= 1 connection = WinRM present, review required (weak, 0.45).
+      Tools like Evil-WinRM, CrackMapExec, and Cobalt Strike all leverage WinRM for
+      remote execution and lateral movement.
+    source: winrm_connection_count
+    threshold: ">= 5"
+    weight: 0.80
+    threshold_low: ">= 1"
+    weight_low: 0.45
+    attack_category: A
+
+  - id: smb_with_winrm
+    description: >
+      SMB lateral movement alongside WinRM — attackers commonly use SMB for initial
+      access and file staging, then WinRM for execution. Both together indicate a
+      post-exploitation lateral movement phase rather than isolated admin activity.
+    source: smb_lateral_host_count
+    threshold: ">= 2"
+    weight: 0.35
+    attack_category: B
+
+combination_bonuses:
+  - signals: [winrm_connections, smb_with_winrm]
+    bonus: 0.15
+    reason: WinRM + SMB lateral movement together is characteristic of post-exploitation tooling
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.30
+
+false_positive_notes: >
+  WinRM is used legitimately by IT teams (Ansible, DSC, SCCM remote sessions, Azure Arc).
+  Key questions: is the source host a known management server or bastion host?
+  Is WinRM explicitly enabled in Group Policy? Does the timing align with maintenance windows?
+  Connections from a user workstation to multiple servers outside of maintenance windows
+  are very suspicious.
+
+references:
+  - "MITRE ATT&CK T1021.006"
+  - "https://attack.mitre.org/techniques/T1021/006/"
+  - "Evil-WinRM: https://github.com/Hackplayers/evil-winrm"
+  - "CrackMapExec WinRM: https://mpgn.gitbook.io/crackmapexec/winrm-protocol"

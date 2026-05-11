@@ -1,0 +1,72 @@
+ttp_id: T1550.002
+name: Pass-the-Hash
+category: lateral_movement
+mitre_tactic: TA0008
+mitre_tactic_name: Lateral Movement
+confidence_ceiling: HIGH
+required_protocols: [smb2, smb]
+
+# PTH uses NTLM (not Kerberos) to authenticate using a captured NTLM hash.
+# The primary observable is SMB authentication reaching many distinct hosts
+# without corresponding Kerberos TGT activity — attackers go wide quickly because
+# PTH requires no password cracking.
+minimum_presence:
+  smb_lateral_host_count: 3         # meaningful lateral movement; benign traffic rarely fans to 3+ hosts
+
+signals:
+  - id: smb_lateral_host_spread
+    description: >
+      SMB connections to multiple distinct hosts. PTH enables rapid lateral movement
+      because the attacker reuses a single hash credential.
+      >= 7 hosts = broad spread (strong, 0.65); >= 3 hosts = notable spread (weak, 0.30).
+      Legitimate admin activity rarely fans out to many hosts in a single capture window.
+    source: smb_lateral_host_count
+    threshold: ">= 7"
+    weight: 0.65
+    threshold_low: ">= 3"
+    weight_low: 0.30
+    attack_category: A
+
+  - id: admin_share_access
+    description: >
+      Admin shares (C$, ADMIN$, IPC$) accessed — PTH attackers target these for code execution
+      and persistence. Legitimate access is possible but notable in a combined signal context.
+    source: smb_admin_share_detected
+    threshold: "== true"
+    weight: 0.45
+    attack_category: B
+
+  - id: low_kerberos_despite_smb_lateral
+    description: >
+      Kerberos traffic is low/absent while SMB lateral movement is high. PTH bypasses
+      Kerberos entirely by using NTLM for authentication. Low Kerberos in an otherwise
+      Active Directory environment with active SMB lateral movement is anomalous.
+    source: kerberos_packet_count
+    threshold: "< 10"
+    weight: 0.25
+    attack_category: B
+
+combination_bonuses:
+  - signals: [smb_lateral_host_spread, admin_share_access]
+    bonus: 0.20
+    reason: Wide SMB fan-out plus admin share access is textbook PTH lateral movement
+
+  - signals: [smb_lateral_host_spread, admin_share_access, low_kerberos_despite_smb_lateral]
+    bonus: 0.10
+    reason: SMB lateral without Kerberos + admin shares — PTH full signature
+
+score_thresholds:
+  deep_dive: 0.60
+  report: 0.40
+
+false_positive_notes: >
+  Legitimate Windows sysadmin activity can reach many hosts via SMB admin shares.
+  Correlate with the timing (off-hours?), the initiating host (is it a known admin
+  workstation or a user endpoint?), and whether Kerberos TGTs are also present for
+  the same source IP. A single admin host reaching 5+ servers via admin shares with
+  matching Kerberos activity is likely benign.
+
+references:
+  - "MITRE ATT&CK T1550.002"
+  - "https://attack.mitre.org/techniques/T1550/002/"
+  - "Harmj0y: Pass-the-Hash Is Dead: Long Live LocalAccountTokenFilterPolicy"

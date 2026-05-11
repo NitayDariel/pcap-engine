@@ -7,6 +7,7 @@ Phase 3 scorer reads these fields by name — field names are the API contract w
 from __future__ import annotations
 
 import math
+import re
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
@@ -112,6 +113,20 @@ class ProtocolSignals:
     ldap_packet_count: int = 0
     cldap_packet_count: int = 0
 
+    # --- WinRM (remote management lateral movement) ---
+    winrm_connection_count: int = 0             # connections to port 5985 (HTTP) or 5986 (HTTPS)
+
+    # --- Inbound scanning (T1595 — external host scanning inward) ---
+    inbound_scan_unique_src_count: int = 0      # external IPs scanning >=5 ports on internal hosts
+
+    # --- Data encoding / obfuscation ---
+    dns_ptr_lookup_count: int = 0               # PTR queries — reverse DNS recon indicator
+    dns_base64_label_count: int = 0             # DNS labels matching base64/hex encoding (len>=24, entropy>4.0)
+    http_base64_uri_count: int = 0              # HTTP requests whose URI contains base64-like components
+
+    # --- Web service C2 (T1102) ---
+    dns_c2_service_lookup_count: int = 0        # DNS queries for Telegram/Discord/Pastebin/Slack C2 platforms
+
     # --- Beaconing (RITA-style 4-factor composite) ---
     beacon_candidates: list = field(default_factory=list)  # list of BeaconCandidate
     beacon_top_score: float = 0.0                          # highest composite score seen
@@ -212,6 +227,26 @@ def _dns_signals(dns_df: pd.DataFrame, packet_count: int) -> dict:
         reverse=True,
     )[:20]
 
+    # PTR query count — mass reverse DNS lookups indicate host/network enumeration
+    if "qtype_name" in dns_df.columns:
+        out["dns_ptr_lookup_count"] = int((dns_df["qtype_name"] == "PTR").sum())
+
+    # DNS labels with base64/hex encoding — indicator of DNS-based data exfil or C2 encoding.
+    # Gate: label >= 24 chars, only base64url charset, Shannon entropy > 4.0.
+    # This rejects short CDN tokens and human-readable strings while catching encoded payloads.
+    _B64_LABEL_RE = re.compile(r'^[A-Za-z0-9+/=_-]{24,}$')
+    base64_label_count = 0
+    if "query" in dns_df.columns:
+        for q in dns_df["query"].dropna():
+            q = str(q)
+            if _is_srv_record(q) or q.endswith(".local"):
+                continue
+            for label in q.split("."):
+                if _B64_LABEL_RE.match(label) and _shannon_entropy(label) > 4.0:
+                    base64_label_count += 1
+                    break  # count once per query, not per label
+    out["dns_base64_label_count"] = base64_label_count
+
     return out
 
 
@@ -228,6 +263,15 @@ def _http_signals(http_df: pd.DataFrame, pcap: str, packet_count: int) -> dict:
         if "id.resp_h" in http_df.columns:
             post_dests = http_df.loc[http_df["method"] == "POST", "id.resp_h"].dropna()
             out["http_post_destinations"] = [str(ip) for ip in post_dests.unique().tolist()]
+
+    # HTTP URIs containing base64-encoded components (C2 data encoding indicator).
+    # Looks for contiguous base64-alphabet runs of 24+ chars in the URI path/query.
+    # The `=` padding is optional; most C2 frameworks omit it.
+    if "uri" in http_df.columns:
+        _B64_URI_RE = re.compile(r'[A-Za-z0-9+/]{24,}={0,2}')
+        out["http_base64_uri_count"] = int(
+            http_df["uri"].dropna().apply(lambda u: bool(_B64_URI_RE.search(str(u)))).sum()
+        )
 
     # Cleartext credentials — check via tshark (HTTP Basic Auth)
     try:
@@ -545,5 +589,42 @@ def run(
             signals.http_on_nonstandard_port_count = len(ns_http)
         except Exception:
             pass
+
+    # WinRM connections (port 5985 HTTP / 5986 HTTPS) — lateral movement via Windows Remote Management
+    if not conn_df.empty and "id.resp_p" in conn_df.columns:
+        winrm_mask = conn_df["id.resp_p"].isin([5985, 5986])
+        signals.winrm_connection_count = int(winrm_mask.sum())
+
+    # Inbound port scans: external IPs with S0/REJ/RSTO connections to >=5 distinct internal ports.
+    # Distinguishes inbound recon (T1595) from outbound scanning (T1046).
+    if not conn_df.empty and ctx.internal_ips and "id.orig_h" in conn_df.columns:
+        internal_set = set(ctx.internal_ips)
+        if "conn_state" in conn_df.columns and "id.resp_h" in conn_df.columns:
+            inbound_scan_df = conn_df[
+                (~conn_df["id.orig_h"].isin(internal_set)) &
+                (conn_df["id.resp_h"].isin(internal_set)) &
+                (conn_df["conn_state"].isin(["S0", "REJ", "RSTO"]))
+            ]
+            if not inbound_scan_df.empty and "id.resp_p" in inbound_scan_df.columns:
+                src_port_counts = inbound_scan_df.groupby("id.orig_h")["id.resp_p"].nunique()
+                signals.inbound_scan_unique_src_count = int((src_port_counts >= 5).sum())
+
+    # Web service C2 platform lookups — DNS queries for Telegram/Discord/Pastebin/Slack APIs.
+    # Legitimate use is possible but context (post-infection, combined with other signals) matters.
+    _C2_SERVICE_DOMAINS = {
+        "api.telegram.org", "t.me", "core.telegram.org",
+        "discord.com", "discordapp.com", "cdn.discordapp.com",
+        "pastebin.com", "rentry.co", "hastebin.com",
+        "api.slack.com", "hooks.slack.com",
+        "raw.githubusercontent.com",
+    }
+    if not dns_df.empty and "query" in dns_df.columns:
+        signals.dns_c2_service_lookup_count = int(sum(
+            1 for q in dns_df["query"].dropna()
+            if any(
+                str(q).lower() == svc or str(q).lower().endswith("." + svc)
+                for svc in _C2_SERVICE_DOMAINS
+            )
+        ))
 
     return signals

@@ -1,0 +1,92 @@
+ttp_id: T1102
+name: Web Service C2
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: HIGH
+required_protocols: [dns]
+
+# T1102 — adversaries use legitimate web services (Telegram, Discord, Slack, Pastebin,
+# GitHub) as C2 relays. Traffic to these services is often allowed by corporate firewalls
+# and blends with legitimate employee usage.
+#
+# Key observable: DNS queries for API endpoints of these services, especially from
+# hosts that don't typically use them (workstations, servers), or in unusual patterns
+# (repeated polling at fixed intervals matching a beaconing rhythm).
+#
+# Tracked platforms:
+#   Telegram: api.telegram.org, t.me, core.telegram.org
+#   Discord:  discord.com, discordapp.com, cdn.discordapp.com
+#   Pastebin: pastebin.com, rentry.co, hastebin.com
+#   Slack:    api.slack.com, hooks.slack.com
+#   GitHub:   raw.githubusercontent.com (raw content hosting for staged payloads)
+minimum_presence:
+  dns_c2_service_lookup_count: 2    # at least some queries to known C2-capable platforms
+
+signals:
+  - id: c2_service_dns_queries
+    description: >
+      DNS queries for known web service C2 platforms (Telegram API, Discord, Pastebin, etc.).
+      >= 10 queries = systematic polling — automated C2 communication (strong, 0.75);
+      >= 2 queries = platform present, review timing context (weak, 0.40).
+      Repeated polling of api.telegram.org in particular is heavily favored by malware
+      families: Lumma, RedLine, Agent Tesla, AsyncRAT.
+    source: dns_c2_service_lookup_count
+    threshold: ">= 10"
+    weight: 0.75
+    threshold_low: ">= 2"
+    weight_low: 0.40
+    attack_category: A
+
+  - id: high_post_volume
+    description: >
+      >= 50 HTTP POST requests — web service C2 often uses POSTs to send beacons
+      and receive commands through the service's API. High POST volume to a single
+      external destination is particularly suspicious.
+    source: http_plaintext_post_count
+    threshold: ">= 50"
+    weight: 0.40
+    attack_category: B
+
+  - id: beaconing_pattern
+    description: >
+      High beacon composite score (>= 0.70) — C2 over web services follows a beaconing
+      pattern; the communication interval matches the malware's check-in timer.
+      RITA-style scoring detects the periodic regularity characteristic of automated polling.
+    source: beacon_top_score
+    threshold: ">= 0.70"
+    weight: 0.35
+    attack_category: B
+
+combination_bonuses:
+  - signals: [c2_service_dns_queries, beaconing_pattern]
+    bonus: 0.20
+    reason: Web service queries with beaconing pattern — strong automated C2 indicator
+
+  - signals: [c2_service_dns_queries, high_post_volume]
+    bonus: 0.15
+    reason: Platform DNS queries + high POST volume matches API-polling C2 pattern
+
+  - signals: [c2_service_dns_queries, beaconing_pattern, high_post_volume]
+    bonus: 0.05
+    reason: All three signals together — near-certain web service C2 activity
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.30
+
+false_positive_notes: >
+  These platforms are used legitimately by many employees (Slack for work, Discord for
+  gaming, GitHub for development). Key differentiators:
+  (1) is the querying host a server or managed workstation? (servers rarely query Telegram)
+  (2) does the timing match a beaconing interval rather than organic human usage?
+  (3) is the volume out of proportion? (humans don't poll api.telegram.org 100x per hour)
+  (4) is this occurring during a malware infection window (identified by other TTPs)?
+
+references:
+  - "MITRE ATT&CK T1102"
+  - "https://attack.mitre.org/techniques/T1102/"
+  - "Lumma Stealer Telegram C2: api.telegram.org bot polling"
+  - "AsyncRAT Discord webhook C2 analysis"
+  - "T1102.001 — Dead Drop Resolver"
+  - "T1102.002 — Bidirectional Communication"

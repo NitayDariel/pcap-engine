@@ -1,0 +1,80 @@
+ttp_id: T1132.001
+name: Standard Encoding — Base64
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: CONFIRMED
+required_protocols: []
+
+# T1132.001 — adversaries encode C2 data in base64 to evade string-based detection
+# and blend into legitimate-looking traffic.
+#
+# Observable signals:
+#   HTTP: long base64-like strings in URI paths or query parameters (C2 beacons
+#         often encode victim ID, commands, or exfil data as base64 URL params)
+#   DNS:  first labels with base64/hex encoding (iodine, dnscat2, many custom tools)
+#
+# Key distinguisher: legitimate base64 in URIs is common (image src, OAuth tokens,
+# session IDs) but is typically short (< 24 chars) and bound to known CDN/SSO domains.
+# Malicious C2 encoding tends to appear under unknown/single-use domains with longer,
+# uniformly high-entropy labels.
+minimum_presence:
+  dns_base64_label_count: 3   # minimal encoding presence required to run this playbook
+
+signals:
+  - id: dns_encoded_labels
+    description: >
+      DNS queries containing labels matching base64/hex encoding pattern
+      (length >= 24, only base64 charset, Shannon entropy > 4.0).
+      >= 10 queries = systematic DNS-based encoding (strong, 0.60);
+      >= 3 queries = early-stage or low-bandwidth (weak, 0.30).
+      Tools like iodine and dnscat2 encode arbitrary data into DNS labels;
+      legitimate DNS labels are human-readable words with entropy < 3.5.
+    source: dns_base64_label_count
+    threshold: ">= 10"
+    weight: 0.60
+    threshold_low: ">= 3"
+    weight_low: 0.30
+    attack_category: A
+
+  - id: http_base64_uris
+    description: >
+      HTTP requests with URIs containing base64-like components (24+ char
+      alphanumeric run, optionally padded with '=').
+      >= 10 requests = systematic HTTP encoding (strong, 0.55);
+      >= 3 requests = possible C2 check-in pattern (weak, 0.25).
+      C2 frameworks like Cobalt Strike, Metasploit, and custom implants commonly
+      encode victim data into GET/POST parameters.
+    source: http_base64_uri_count
+    threshold: ">= 10"
+    weight: 0.55
+    threshold_low: ">= 3"
+    weight_low: 0.25
+    attack_category: B
+
+combination_bonuses:
+  - signals: [dns_encoded_labels, http_base64_uris]
+    bonus: 0.20
+    reason: Base64 encoding simultaneously in DNS and HTTP strongly suggests systematic C2 encoding
+
+  - signals: [dns_encoded_labels, http_base64_uris]
+    bonus: 0.00
+    # handled above; no double-bonus needed
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.30
+
+false_positive_notes: >
+  Many legitimate applications use base64 in URLs: OAuth 2.0 tokens, PKCE challenge
+  parameters, image data URIs, session tokens. The key differentiators are:
+  (1) the hosting domain — known SSO/CDN providers vs. unknown domains,
+  (2) request frequency — C2 beacons repeat the same pattern on a timer,
+  (3) DNS labeling — legitimate services don't encode data into DNS first labels.
+  Combine with beacon scoring to confirm periodic timing pattern.
+
+references:
+  - "MITRE ATT&CK T1132.001"
+  - "https://attack.mitre.org/techniques/T1132/001/"
+  - "iodine DNS tunnel: http://code.kryo.se/iodine/"
+  - "dnscat2: https://github.com/iagox86/dnscat2"

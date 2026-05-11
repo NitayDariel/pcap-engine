@@ -1,0 +1,77 @@
+ttp_id: T1595
+name: Active Scanning (Inbound)
+category: reconnaissance
+mitre_tactic: TA0043
+mitre_tactic_name: Reconnaissance
+confidence_ceiling: HIGH
+required_protocols: []
+
+# T1595 is pre-compromise scanning from the adversary toward the target network.
+# Observable in network captures as: external IPs sending SYN probes to multiple
+# internal ports/hosts with S0 (no response), REJ (TCP RST), or RSTO states.
+# This is distinct from T1046 (internal host scanning outbound) — this is the
+# adversary mapping your perimeter from outside.
+minimum_presence:
+  inbound_scan_unique_src_count: 1    # at least one external IP scanning inward
+
+signals:
+  - id: inbound_scan_sources
+    description: >
+      External IPs each scanning >= 5 distinct internal ports with SYN-only connections.
+      >= 3 sources = coordinated/distributed recon campaign (strong, 0.70);
+      >= 1 source = targeted inbound scan (weak, 0.45).
+      Multiple external scanners simultaneously is characteristic of attack infrastructure
+      or reconnaissance tooling (Shodan-triggered exploitation, VPN scanners, etc.).
+    source: inbound_scan_unique_src_count
+    threshold: ">= 3"
+    weight: 0.70
+    threshold_low: ">= 1"
+    weight_low: 0.45
+    attack_category: A
+
+  - id: high_syn_only_volume
+    description: >
+      >= 200 SYN-only connections (S0/REJ/RSTO states) — large volumes of half-open
+      connections indicate scanning activity. When paired with external scan sources,
+      confirms the inbound scan volume.
+    source: scan_syn_only_connection_count
+    threshold: ">= 200"
+    weight: 0.35
+    attack_category: B
+
+  - id: scan_port_breadth
+    description: >
+      A single scanner hitting >= 100 unique destination ports — broad port sweep
+      characteristic of service enumeration tools (nmap -sV, masscan, zmap).
+    source: scan_max_unique_dst_ports
+    threshold: ">= 100"
+    weight: 0.30
+    attack_category: B
+
+combination_bonuses:
+  - signals: [inbound_scan_sources, high_syn_only_volume]
+    bonus: 0.15
+    reason: Multiple external scanners with high SYN volume confirms coordinated inbound recon
+
+  - signals: [inbound_scan_sources, scan_port_breadth]
+    bonus: 0.10
+    reason: External scanning plus broad port sweep indicates automated enumeration tooling
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.35
+
+false_positive_notes: >
+  Internet background radiation (Shodan, Censys, vulnerability scanners) will generate
+  inbound scan-like traffic against any internet-exposed host. Distinguish by:
+  (1) are the scanned ports consistent with targeted attack (not just 80/443/22/25)?
+  (2) does the scanning IP belong to known security research orgs?
+  (3) does the scan occur in conjunction with later exploitation attempts?
+  PCAPs from behind a NAT/firewall typically won't see this unless the capture point
+  is at the perimeter.
+
+references:
+  - "MITRE ATT&CK T1595"
+  - "https://attack.mitre.org/techniques/T1595/"
+  - "T1595.001 — Scanning IP Blocks"
+  - "T1595.002 — Vulnerability Scanning"

@@ -1,6 +1,6 @@
 # PCAP Engine — Roadmap
 
-> Live document. Update status fields in-place. Last updated: 2026-05-11 (v9 verification)
+> Live document. Update status fields in-place. Last updated: 2026-05-11 (v10 — Sprint 10A complete, 30/30 playbooks)
 
 ---
 
@@ -12,6 +12,8 @@
 | Phase 2 — Protocol Signals | ✅ Implemented | Zeek logs, Kerberos, LDAP, DRSUAPI, scan states |
 | Phase 2 — Beacon Scoring | ✅ Implemented | RITA 4-factor + FFT; verified no FP on short exercise PCAPs |
 | Bug Sprint v9 — 6 Detection Fixes | ✅ Done | DNS SRV filter, mDNS hostname, HTTP POST IOC, MAC lookup, DCSync gate, T1219 playbook |
+| Bug Sprint v9B — 2 More Fixes | ✅ Done | SMB FQDN domain override (authoritative over DHCP/Kerberos), Kerberoasting RC4 gate |
+| Sprint 10A — 8 New Playbooks | ✅ Done | 30/30 target; 6 new signals (WinRM, inbound scan, PTR, base64, C2 service DNS) |
 | Phase 2.5 — Suricata | ✅ Implemented | Graceful skip if not installed; ET Open rules |
 | Phase 3 — TTP Sweep | ✅ Implemented | Parallel YAML scoring; tiered thresholds; Suricata boost |
 | Phase 4 — Deep Dive | ✅ Implemented | Targeted tshark evidence for high-score TTPs |
@@ -24,19 +26,20 @@
 
 ---
 
-## Playbooks — 21 of 30 Target
+## Playbooks — 30 of 30 Target ✅
 
 | Category | Playbooks | Count |
 |---|---|---|
-| C2 & Beaconing | T1008, T1071, T1071.001, T1071.004, T1073.001, T1095, T1219 | 7 |
+| C2 & Beaconing | T1008, T1071, T1071.001, T1071.004, T1095, T1132.001, T1219, T1036.005, T1102, T1572, T1573.001 | 11 |
 | Credential Access | T1003.006, T1040, T1056.003, T1110.001, T1558.003 | 5 |
-| Discovery | T1018, T1049, T1135 | 3 |
+| Discovery | T1016, T1018, T1049, T1135 | 4 |
 | Exfiltration | T1041, T1048.001, T1048.003 | 3 |
-| Lateral Movement | T1021.001, T1021.002, T1557 | 3 |
-| Reconnaissance | T1046 | 1 |
-| **Total** | | **22 / 30** |
+| Lateral Movement | T1021.001, T1021.002, T1021.006, T1550.002, T1557 | 5 |
+| Reconnaissance | T1046, T1595 | 2 |
+| **Total** | | **30 / 30** ✅ |
 
-**8 playbooks still needed** (see Planned Work below)
+**Sprint 10A complete.** 8 new playbooks added: T1550.002, T1595, T1132.001, T1016, T1021.006, T1572, T1102, T1036.005.
+6 new ProtocolSignals computed: `winrm_connection_count`, `inbound_scan_unique_src_count`, `dns_ptr_lookup_count`, `dns_base64_label_count`, `http_base64_uri_count`, `dns_c2_service_lookup_count`.
 
 ---
 
@@ -151,9 +154,9 @@
 ## Planned Work
 
 ### Now — Verification Sprint (BLOCKING)
-- [ ] Read `2024-11-26-answers.pdf` and compare against `outputs/2024-11-26_v8/report.md`
-- [ ] Run all 6 PCAPs and populate verification matrix above
-- [ ] Document FP/FN findings; tune signal weights if needed
+- [x] Read `2024-11-26-answers.pdf` and compare against `outputs/2024-11-26_v8/report.md` ✅ Done v9
+- [x] Run all 5 PCAPs and populate verification matrix above ✅ Done v9
+- [x] Document FP/FN findings; tune signal weights if needed ✅ Done v9
 
 ### Sprint 9A — Zeek JA3
 - [ ] `zkg install zeek/sethhall/ja3` — enable JA3 in Zeek run
@@ -172,16 +175,15 @@
 - [ ] Add `rita_beacon_score` to ProtocolSignals
 - [ ] Only runs if Docker is available (graceful skip otherwise)
 
-### Sprint 10A — 9 More Playbooks (reach 30)
-- [ ] T1550.002 Pass-the-Hash (NTLM hash reuse)
-- [ ] T1595 Active Scanning (external inbound scans)
-- [ ] T1132.001 Base64 Data Encoding (C2 encoding)
-- [ ] T1016 Network Configuration Discovery (ipconfig/route DNS lookups)
-- [ ] T1021.006 WinRM lateral movement (port 5985/5986)
-- [ ] T1572 Protocol Tunneling (non-standard port usage)
-- [ ] T1090.001 Internal Proxy (traffic chaining through internal host)
-- [ ] T1102 Web Service C2 (Slack, Telegram, Pastebin callbacks)
-- [ ] T1036.005 Masquerading (unexpected protocol on standard port)
+### Sprint 10A — 8 More Playbooks (reach 30) ✅ COMPLETE
+- [x] T1550.002 Pass-the-Hash — smb_lateral_host_count, admin_share_detected, low kerberos gate
+- [x] T1595 Active Scanning — inbound_scan_unique_src_count (new signal), scan_syn_only_count
+- [x] T1132.001 Base64 Data Encoding — dns_base64_label_count + http_base64_uri_count (new signals)
+- [x] T1016 Network Config Discovery — dns_ptr_lookup_count (new signal), ldap, cldap
+- [x] T1021.006 WinRM — winrm_connection_count (new signal), smb lateral corroboration
+- [x] T1572 Protocol Tunneling — dns tunnel + icmp large payload + http port mismatch (composite)
+- [x] T1102 Web Service C2 — dns_c2_service_lookup_count (new signal: Telegram/Discord/Pastebin)
+- [x] T1036.005 Masquerading — http_on_nonstandard_port + tls_missing_sni + cert anomaly
 
 ### Sprint 10B — Test Infrastructure
 - [ ] `tests/test_scorer.py` — unit tests for signal evaluation, tiered thresholds

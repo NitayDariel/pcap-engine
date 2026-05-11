@@ -1,0 +1,91 @@
+ttp_id: T1572
+name: Protocol Tunneling
+category: c2_and_beaconing
+mitre_tactic: TA0011
+mitre_tactic_name: Command and Control
+confidence_ceiling: HIGH
+required_protocols: []
+
+# T1572 — adversaries tunnel C2 traffic through allowed protocols (DNS, ICMP, HTTP)
+# to evade network-layer detection. Unlike T1071 (application layer C2 using the
+# protocol legitimately), T1572 actively abuses the protocol to carry data beyond
+# its design intent.
+#
+# Key tunnel types and their observables:
+#   DNS tunnel:   high subdomain diversity, long encoded labels, TXT/NULL queries
+#   ICMP tunnel:  large payload sizes (> 512 bytes), high ICMP volume
+#   HTTP CONNECT: proxy CONNECT method to non-proxy destinations
+#
+# No minimum_presence: each tunnel type is independent — ICMP tunneling alone
+# should trigger this without DNS indicators and vice versa.
+minimum_presence: {}
+
+signals:
+  - id: dns_tunnel_indicators
+    description: >
+      Parent domains with high subdomain diversity AND long encoded first-labels (avg > 15 chars).
+      >= 2 suspicious parents = established DNS tunnel (strong, 0.60);
+      >= 1 = early-stage or single-domain tunnel (weak, 0.35).
+      DNS tunneling tools encode data into first labels creating many unique FQDNs
+      under a controlled domain with long, high-entropy names.
+    source: dns_suspicious_parent_count
+    threshold: ">= 2"
+    weight: 0.60
+    threshold_low: ">= 1"
+    weight_low: 0.35
+    attack_category: A
+
+  - id: icmp_data_payload
+    description: >
+      ICMP packets with payload > 512 bytes — standard ping uses 32-64 byte payloads;
+      ICMP tunneling tools (ptunnel, icmptunnel) carry large data payloads in Echo
+      Request/Reply packets.
+      >= 10 packets = active ICMP tunnel (strong, 0.55);
+      >= 3 packets = possible tunnel or diagnostic (weak, 0.25).
+    source: icmp_large_payload_count
+    threshold: ">= 10"
+    weight: 0.55
+    threshold_low: ">= 3"
+    weight_low: 0.25
+    attack_category: A
+
+  - id: http_port_mismatch
+    description: >
+      >= 20 cleartext HTTP connections on non-standard ports (not 80/8080) — HTTP
+      tunneling tools route traffic through ports chosen to bypass firewall rules.
+      Cleartext HTTP on port 443 or other expected-encrypted ports is a protocol
+      abuse indicator.
+    source: http_on_nonstandard_port_count
+    threshold: ">= 20"
+    weight: 0.45
+    attack_category: B
+
+combination_bonuses:
+  - signals: [dns_tunnel_indicators, icmp_data_payload]
+    bonus: 0.20
+    reason: Multi-protocol tunneling (DNS + ICMP) indicates sophisticated covert channel
+
+  - signals: [dns_tunnel_indicators, http_port_mismatch]
+    bonus: 0.15
+    reason: DNS diversity plus HTTP on unexpected ports — multi-layer protocol abuse
+
+  - signals: [icmp_data_payload, http_port_mismatch]
+    bonus: 0.10
+    reason: Both ICMP payload anomaly and HTTP port mismatch point to protocol tunneling
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.35
+
+false_positive_notes: >
+  DNS parent diversity is common for CDN-heavy environments — the first-label length gate
+  (> 15 chars average) eliminates most CDN false positives since CDN hostnames use human-readable
+  or short hash labels. Large ICMP payloads can come from legitimate diagnostic tools (ping -l,
+  MTU discovery). HTTP on non-standard ports can be internal services or dev environments.
+  Look for the combination of signals rather than any single indicator.
+
+references:
+  - "MITRE ATT&CK T1572"
+  - "https://attack.mitre.org/techniques/T1572/"
+  - "iodine (DNS tunnel): http://code.kryo.se/iodine/"
+  - "ptunnel-ng (ICMP tunnel): https://github.com/lnslbrty/ptunnel-ng"

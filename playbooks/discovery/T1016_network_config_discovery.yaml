@@ -1,0 +1,85 @@
+ttp_id: T1016
+name: System Network Configuration Discovery
+category: discovery
+mitre_tactic: TA0007
+mitre_tactic_name: Discovery
+confidence_ceiling: MEDIUM
+required_protocols: [dns]
+
+# T1016 — adversaries discover network configuration to understand topology,
+# find additional targets, and plan lateral movement.
+#
+# Network-visible observables:
+#   DNS PTR queries: reverse DNS lookups on discovered IPs (ipconfig, arp -a, nslookup)
+#   LDAP/CLDAP: AD site topology queries, subnet discovery
+#   DNS forward queries: mapping host-to-IP for discovered hostnames
+#
+# Note: T1016 is often paired with T1018 (Remote System Discovery) and T1135 (Network
+# Share Discovery). High PTR volume from a single workstation IP is the primary indicator.
+minimum_presence:
+  dns_ptr_lookup_count: 20       # meaningful PTR recon; benign hosts rarely generate this many
+
+signals:
+  - id: ptr_lookup_volume
+    description: >
+      PTR (reverse DNS) lookups — automated tools like BloodHound, PowerView, and nmap
+      run PTR queries to resolve all IPs in a discovered subnet.
+      >= 100 queries = mass automated enumeration (strong, 0.65);
+      >= 20 queries = notable recon activity (weak, 0.30).
+      Benign workstations rarely generate more than a handful of PTR queries.
+    source: dns_ptr_lookup_count
+    threshold: ">= 100"
+    weight: 0.65
+    threshold_low: ">= 20"
+    weight_low: 0.30
+    attack_category: A
+
+  - id: ldap_ad_enumeration
+    description: >
+      >= 50 LDAP packets — LDAP queries for AD topology (subnets, sites, OUs) are
+      characteristic of network config discovery tools. Legitimate clients make targeted
+      LDAP queries; enumeration tools make broad, repeated queries across many object classes.
+    source: ldap_packet_count
+    threshold: ">= 50"
+    weight: 0.40
+    attack_category: B
+
+  - id: cldap_site_discovery
+    description: >
+      >= 20 CLDAP packets — Connectionless LDAP (UDP port 389) is used specifically
+      for AD site discovery and DC locator queries. High CLDAP volume indicates
+      automated DC/subnet enumeration typical of BloodHound and similar tools.
+    source: cldap_packet_count
+    threshold: ">= 20"
+    weight: 0.30
+    attack_category: B
+
+combination_bonuses:
+  - signals: [ptr_lookup_volume, ldap_ad_enumeration]
+    bonus: 0.20
+    reason: Mass PTR recon plus LDAP enumeration is the BloodHound/PowerView network discovery fingerprint
+
+  - signals: [ptr_lookup_volume, cldap_site_discovery]
+    bonus: 0.15
+    reason: PTR lookups with CLDAP site queries indicates systematic AD network topology mapping
+
+  - signals: [ldap_ad_enumeration, cldap_site_discovery]
+    bonus: 0.10
+    reason: Both LDAP and CLDAP active — systematic AD structure enumeration
+
+score_thresholds:
+  deep_dive: 0.50
+  report: 0.30
+
+false_positive_notes: >
+  DNS servers and recursive resolvers generate high PTR volumes legitimately.
+  Filter by the initiating host — PTR queries from a user workstation are suspicious;
+  from a DNS server or monitoring system, they are expected. LDAP and CLDAP traffic
+  is normal from domain-joined machines during login/group policy refresh; look for
+  unusual volume, unusual hours, or a non-DC initiating unusually broad queries.
+
+references:
+  - "MITRE ATT&CK T1016"
+  - "https://attack.mitre.org/techniques/T1016/"
+  - "BloodHound: https://github.com/BloodHoundAD/BloodHound"
+  - "PowerView: Get-NetSubnet, Get-NetDomainController"

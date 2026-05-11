@@ -1,0 +1,93 @@
+ttp_id: T1036.005
+name: Masquerading — Protocol on Non-Standard Port
+category: c2_and_beaconing
+mitre_tactic: TA0005
+mitre_tactic_name: Defense Evasion
+confidence_ceiling: HIGH
+required_protocols: []
+
+# T1036.005 — adversaries masquerade malicious traffic as legitimate by using
+# ports/protocols associated with allowed services. At the network layer, this
+# manifests as protocol mismatch: cleartext HTTP where HTTPS is expected, or
+# TLS sessions without proper SNI/cert that should have them.
+#
+# Key observable patterns:
+#   Cleartext HTTP on port 443  — expected HTTPS, but RATs (NetSupport, NjRAT) use
+#                                  cleartext HTTP on 443 to blend with HTTPS traffic
+#   HTTP on port 8443/3128      — using common alternate-HTTPS or proxy ports
+#   TLS without SNI             — masquerading connections often skip SNI to avoid
+#                                  hostname-based detection
+#   Self-signed TLS certs       — masqueraders can't get valid certs for attacker domains
+#
+# Frequently co-occurs with T1219 (RAT C2) and T1571 (Non-Standard Port).
+minimum_presence:
+  http_on_nonstandard_port_count: 5   # cleartext HTTP on any port other than 80/8080
+
+signals:
+  - id: cleartext_http_wrong_port
+    description: >
+      Cleartext HTTP packets on non-standard ports (not 80/8080).
+      >= 20 packets = active protocol masquerading (strong, 0.70);
+      >= 5 packets = low-volume or check-in (weak, 0.35).
+      NetSupport RAT, NjRAT, AsyncRAT, and custom implants commonly use cleartext
+      HTTP on port 443 or other expected-encrypted ports. Cleartext on 443 is
+      an immediate protocol mismatch indicator.
+    source: http_on_nonstandard_port_count
+    threshold: ">= 20"
+    weight: 0.70
+    threshold_low: ">= 5"
+    weight_low: 0.35
+    attack_category: A
+
+  - id: tls_missing_sni
+    description: >
+      >= 5 TLS sessions without SNI (Server Name Indication). Legitimate TLS from
+      modern browsers always includes SNI. C2 clients — especially those masquerading
+      traffic — often skip SNI to avoid domain-based detection, or because the implant
+      connects to a raw IP address as the C2 endpoint.
+    source: tls_missing_sni_count
+    threshold: ">= 5"
+    weight: 0.45
+    attack_category: B
+
+  - id: tls_cert_anomaly
+    description: >
+      >= 3 TLS certificate anomalies (self-signed, generic CN, known-bad fingerprint).
+      Masquerading C2 servers can't obtain valid certs for attacker-controlled domains
+      via trusted CAs. Self-signed or generic certs ("localhost", "example.com", empty
+      CN) indicate hastily provisioned attacker infrastructure.
+    source: tls_cert_anomaly_count
+    threshold: ">= 3"
+    weight: 0.35
+    attack_category: B
+
+combination_bonuses:
+  - signals: [cleartext_http_wrong_port, tls_missing_sni]
+    bonus: 0.20
+    reason: Cleartext HTTP on wrong port AND missing SNI TLS — systematic protocol masquerading
+
+  - signals: [cleartext_http_wrong_port, tls_cert_anomaly]
+    bonus: 0.15
+    reason: Protocol mismatch plus cert anomalies — full masquerading profile matches RAT C2 traffic
+
+  - signals: [cleartext_http_wrong_port, tls_missing_sni, tls_cert_anomaly]
+    bonus: 0.05
+    reason: All three masquerading indicators present — high confidence protocol abuse
+
+score_thresholds:
+  deep_dive: 0.55
+  report: 0.35
+
+false_positive_notes: >
+  Some internal services (web proxies, dev servers, monitoring agents) use non-standard
+  ports for HTTP. Check whether the HTTP destination is an internal host (possible admin
+  tool) or an external IP (higher suspicion). Self-signed certs are common in internal
+  PKI environments. The combination of external destination + non-standard port + no SNI
+  is the high-confidence pattern. T1219 (RAT) should score higher when combined with
+  this playbook — look for corroboration.
+
+references:
+  - "MITRE ATT&CK T1036.005"
+  - "https://attack.mitre.org/techniques/T1036/005/"
+  - "NetSupport RAT cleartext HTTP on port 443 analysis"
+  - "T1571 — Non-Standard Port (complementary technique)"
