@@ -119,15 +119,26 @@ def _fft_analysis(iats: np.ndarray, sample_interval: float) -> tuple[float, floa
     Run FFT on inter-arrival sequence to detect jitter-masked periodicity.
     Returns (dominant_period_secs, fft_score [0,1]).
     fft_score > 0 means a dominant frequency was detected above noise floor.
+
+    IATs are non-uniformly spaced in absolute time (each value is a duration, not
+    a sample at a fixed clock tick).  Passing them raw to rfft treats index position
+    as time, producing wrong frequency estimates.  We resample onto a uniform time
+    grid via linear interpolation before applying FFT.
     """
     if len(iats) < 8:
         return 0.0, 0.0
 
     try:
-        # Resample IAT sequence onto a regular grid (needed for FFT)
+        # Build a cumulative-time axis so we know where each IAT sits in real time,
+        # then interpolate onto a uniform grid with the same number of points.
+        t_cumulative = np.cumsum(iats)
         n = len(iats)
-        spectrum = np.abs(np.fft.rfft(iats - np.mean(iats)))
-        freqs = np.fft.rfftfreq(n, d=sample_interval)
+        t_uniform = np.linspace(t_cumulative[0], t_cumulative[-1], n)
+        iats_resampled = np.interp(t_uniform, t_cumulative, iats)
+        actual_dt = float(t_uniform[1] - t_uniform[0]) if n > 1 else max(sample_interval, 1.0)
+
+        spectrum = np.abs(np.fft.rfft(iats_resampled - np.mean(iats_resampled)))
+        freqs = np.fft.rfftfreq(n, d=actual_dt)
 
         if len(spectrum) < 2:
             return 0.0, 0.0

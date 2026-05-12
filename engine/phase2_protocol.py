@@ -132,6 +132,12 @@ class ProtocolSignals:
     beacon_candidates: list = field(default_factory=list)  # list of BeaconCandidate
     beacon_top_score: float = 0.0                          # highest composite score seen
 
+    # --- Singleton suspicious domains ---
+    # Domains queried exactly once that match delivery/RAT/stealer heuristics.
+    # Single-query domains never reach multi-value entropy thresholds, so they need a separate path.
+    dns_singleton_suspicious_domains: list = field(default_factory=list)  # list of domain strings
+    dns_singleton_suspicious_count: int = 0
+
     # --- Zeek metadata ---
     zeek_log_dir: str = ""
     logs_available: list = field(default_factory=list)
@@ -168,6 +174,57 @@ def _entropy_eligible(q: str) -> bool:
     if q.endswith(".local"):
         return False
     return len(q.split(".")) >= 3
+
+
+# High-risk TLDs used by malware delivery infrastructure and disposable domains.
+_HIGHRISK_TLDS = frozenset({
+    ".su", ".ru", ".cyou", ".xyz", ".top", ".tk", ".ml", ".ga", ".cf", ".gq",
+    ".pw", ".cc", ".ws", ".biz.pl", ".click", ".download", ".host", ".uno",
+    ".rest", ".icu", ".monster", ".cfd", ".sbs", ".beauty",
+})
+
+# Keywords that indicate malware delivery, cracked software, or RAT infrastructure.
+_SUSPICIOUS_KEYWORDS = frozenset({
+    "crack", "cracked", "keygen", "serial", "patch", "loader", "payload",
+    "stealer", "modapk", "modandcracked", "apkmod", "hackmod",
+    "netsupport", "anydesk", "remotedesktop", "teamviewer-",
+    "malware", "virus", "trojan", "ransomware",
+})
+
+
+def _is_suspicious_singleton(fqdn: str) -> bool:
+    """
+    True if a once-queried domain exhibits heuristic risk signals.
+    Checks: high-risk TLD, delivery/RAT keywords, or high apex entropy (random-looking domain).
+    Excludes mDNS, SRV records, and reverse-DNS arpa queries.
+    """
+    if not isinstance(fqdn, str) or not fqdn:
+        return False
+    fqdn = fqdn.lower().rstrip(".")
+    if fqdn.endswith(".local") or fqdn.endswith(".arpa"):
+        return False
+    if _is_srv_record(fqdn):
+        return False
+
+    parts = fqdn.split(".")
+    if len(parts) < 2:
+        return False
+    apex = ".".join(parts[-2:])
+    tld = "." + parts[-1]
+
+    if tld in _HIGHRISK_TLDS:
+        return True
+
+    full_lower = fqdn.replace(".", "")
+    if any(kw in full_lower for kw in _SUSPICIOUS_KEYWORDS):
+        return True
+
+    # High-entropy apex (random-looking, DGA-style): entropy > 3.5 on a short name
+    apex_stem = parts[-2]
+    if len(apex_stem) >= 8 and _shannon_entropy(apex_stem) > 3.5:
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +304,14 @@ def _dns_signals(dns_df: pd.DataFrame, packet_count: int) -> dict:
                     base64_label_count += 1
                     break  # count once per query, not per label
     out["dns_base64_label_count"] = base64_label_count
+
+    # Singleton suspicious domains — domains queried exactly once with heuristic risk signals.
+    # These are invisible to entropy/diversity thresholds that require multiple queries.
+    query_counts = dns_df["query"].dropna().value_counts()
+    singletons = [q for q, n in query_counts.items() if n == 1 and isinstance(q, str)]
+    suspicious = [q for q in singletons if _is_suspicious_singleton(q)]
+    out["dns_singleton_suspicious_domains"] = suspicious
+    out["dns_singleton_suspicious_count"] = len(suspicious)
 
     return out
 

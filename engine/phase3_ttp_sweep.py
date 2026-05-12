@@ -48,6 +48,7 @@ def run(
     max_workers: int = 8,
     report_threshold: float = REPORT_THRESHOLD,
     suricata_result=None,  # Optional[SuricataResult] — avoids circular import
+    sigma_result=None,     # Optional[SigmaResult] — avoids circular import
 ) -> list[TTPScore]:
     """
     Sweep all playbooks in parallel. Returns TTPScore list sorted by score descending.
@@ -104,6 +105,20 @@ def run(
                 if result.confidence != "HIGH":
                     result.confidence = "HIGH"
                     result.signals_fired.append("suricata_signature_confirmed")
+                result.score = min(1.0, result.score + 0.10)
+
+    # Apply Sigma rule confirmation boost (same mechanics as Suricata)
+    if sigma_result and sigma_result.available and sigma_result.hits:
+        sigma_techniques = sigma_result.techniques  # set of T-IDs confirmed by Sigma
+        for result in results:
+            base = result.ttp_id.split(".")[0]
+            has_subtechnique = "." in result.ttp_id
+            exact_confirmed = result.ttp_id in sigma_techniques
+            base_confirmed = not has_subtechnique and base in sigma_techniques
+            if exact_confirmed or base_confirmed:
+                if result.confidence not in ("CONFIRMED", "HIGH"):
+                    result.confidence = "HIGH"
+                result.signals_fired.append("sigma_rule_confirmed")
                 result.score = min(1.0, result.score + 0.10)
 
     elapsed = time.time() - t0

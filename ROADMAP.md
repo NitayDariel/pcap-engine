@@ -1,6 +1,6 @@
 # PCAP Engine — Roadmap
 
-> Live document. Update status fields in-place. Last updated: 2026-05-12 (v10.2 — Sprint 9A complete, JA3 fingerprinting live)
+> Live document. Update status fields in-place. Last updated: 2026-05-12 (Sprint 11A — singleton domain detection + README accuracy fixes + Gemini key update)
 
 ---
 
@@ -16,12 +16,16 @@
 | Sprint 10A — 8 New Playbooks | ✅ Done | 30/30 target; 6 new signals (WinRM, inbound scan, PTR, base64, C2 service DNS) |
 | Bug Sprint v10B — 5 IOC Fixes | ✅ Done | Suricata domain regex (space-TLD), safe-domain filter, cert anomaly IPs, scan IP filter, domain gate |
 | Sprint 9A — JA3 Fingerprinting | ✅ Done | zkg salesforce/ja3 installed; packages keyword in Zeek cmd; check_ja3() in phase6; JA3 section in report |
+| Sprint 9B — Sigma Rules | ✅ Done | pySigma evaluator; 21 SigmaHQ zeek rules; Phase 2.6; TTP boost; Sigma section in report |
+| Report Quality Overhaul | ✅ Done | IOC dedup, hash dedup ×N, protocol filter, 30-playbook count, Suricata dedup, evidence formatter |
 | Phase 2.5 — Suricata | ✅ Implemented | Graceful skip if not installed; ET Open rules |
-| Phase 3 — TTP Sweep | ✅ Implemented | Parallel YAML scoring; tiered thresholds; Suricata boost |
+| Phase 2.6 — Sigma Rules | ✅ Implemented | pySigma evaluator; graceful skip if unavailable; 21 network/zeek rules |
+| Phase 3 — TTP Sweep | ✅ Implemented | Parallel YAML scoring; tiered thresholds; Suricata + Sigma boost |
 | Phase 4 — Deep Dive | ✅ Implemented | Targeted tshark evidence for high-score TTPs |
 | Phase 5 — Artifacts | ✅ Implemented | File hashes (tshark), TLS certs (x509.log), SMB events |
 | Phase 6 — IOC Enrichment | ✅ Implemented | VirusTotal + ThreatFox; offline-safe |
-| Phase 7 — Anomaly Layer | ✅ Implemented | Uncategorised pattern detection |
+| Phase 7 — Anomaly Layer | ✅ Implemented | Heuristic pattern detection + Gemini LLM hypothesis (graceful fallback if key absent/quota) |
+| Gemini Integration | ✅ Implemented Sprint 11A | `utils/gemini_client.py`; google-genai SDK; `gemini-3.1-flash-lite`; GOOGLE_API_GENERAL_KEY primary; retry logic; `ai_hypothesis` in anomalies.json + report |
 | Wireshark Export | ✅ Implemented | 8 sections, real IPs embedded, beacon filters |
 | Report (MD) | ✅ Implemented | Exec summary, victim, IOCs, artifacts, beacon, Suricata |
 | Scorer (tiered thresholds) | ✅ Implemented | threshold + threshold_low + _weak suffix + combo bonuses |
@@ -133,8 +137,8 @@
 | ~~Suricata not installed~~ | ~~Zero signature-layer detection~~ | ✅ Done |
 | ~~No formal verification~~ | ~~Can't claim correctness~~ | ✅ 5 PCAPs verified |
 | ~~9 playbooks missing~~ | ~~30% TTP coverage absent~~ | ✅ 10A done, 30/30 |
-| Single-query suspicious domain detection | Delivery domains with 1 DNS query missed (classicgrand.com etc.) | 11A |
-| Full domain from SMB path parsing | Kerberos realm is NetBIOS not FQDN; SMB paths have full domain | 11A |
+| ~~Single-query suspicious domain detection~~ | ~~Delivery domains with 1 DNS query missed (classicgrand.com etc.)~~ | ✅ Sprint 11A — `_is_suspicious_singleton()` heuristic + Anomaly 6 + 28 unit tests |
+| Full domain from SMB path parsing | Kerberos realm is NetBIOS not FQDN; SMB paths have full domain | 11B |
 
 ### Important (reduces coverage)
 | Gap | Impact | Sprint |
@@ -155,6 +159,116 @@
 
 ---
 
+## Sprint 11 — Expert Audit Findings (2026-05-12)
+
+Full skeptic review surfaced the issues below. Each is tracked to a fix sprint.
+
+### CRITICAL — Breaks Correctness Claims
+
+| # | Issue | File | Status |
+|---|---|---|---|
+| C1 | FFT applied to non-resampled IAT sequence — IATs are non-uniform; rfft on them produces meaningless frequency estimates. Comment even says "resample first" but never does it. | `phase2_beacon.py:128` | ✅ Fixed Sprint 11 |
+| C2 | `confidence_ceiling` field in playbooks (e.g. T1071) is read from YAML but **never enforced** in scorer — any playbook can return CONFIRMED even if the author capped it at HIGH | `scorer.py` | ✅ Fixed Sprint 11 |
+| C3 | Zero test coverage — `tests/` contains only `.gitkeep`. No unit tests, no integration tests. Every regression is invisible. | `tests/` | ✅ Partial fix Sprint 11 (scorer + beacon unit tests written) |
+
+### HIGH — Misleading to Consumers
+
+| # | Issue | File | Status |
+|---|---|---|---|
+| H1 | `--no-ai` flag implies AI inference runs; `phase7_anomaly.py` is purely heuristic Python, no LLM called. The `ai_prompt` field is written to JSON but never sent anywhere. | `main.py`, `phase7_anomaly.py` | ✅ Fixed Sprint 11 (flag renamed + help text corrected) |
+| H2 | "Under 15 seconds" runtime claim is offline-only. With `VT_INTERVAL=16s` and default 10 IPs, online enrichment adds **160+ seconds** — not disclosed in README pitch. | `README.md` | ✅ Fixed Sprint 11A |
+| H3 | Scorer weights are arbitrary — no ROC analysis, no empirical FP/TP basis. `_confidence()` thresholds (n≥3, c≥2 → HIGH) are convention, not statistics. Score of 0.60 means different things across playbooks. | `scorer.py` | 🔲 Requires empirical tuning sprint |
+| H4 | JA3 list contains `5d41402abc4b2a76b9719d911017c592` — the MD5 hash of the string `"hello"`, labelled "Metasploit reverse_tcp stager". Will false-positive any session hashing to this value. | `phase6_ioc_enrichment.py:39` | ✅ Fixed Sprint 11 |
+
+### MEDIUM — Architectural Gaps
+
+| # | Issue | File | Status |
+|---|---|---|---|
+| M1 | Anomaly thresholds are magic numbers with no calibration: `dns_nxdomain_rate >= 0.20`, `tls_missing_sni >= 5`, etc. Real environments have wildly different baselines; these are false-positive generators. | `phase7_anomaly.py` | 🔲 Sprint 11B — tie to calibrator |
+| M2 | Single-victim assumption — engine picks one victim IP and all analysis centers on it. Multi-host captures with lateral movement between several victims silently lose non-primary activity. | `phase1_orientation.py`, `reporter.py` | 🔲 Sprint 12 architectural work |
+| M3 | No structured logging — entire pipeline uses `print()`. Cannot integrate with log aggregators, replay analysis runs, or grep for warnings. | all phases | 🔲 Sprint 12 |
+| M4 | No resource limits — no PCAP size check, no subprocess timeout on Zeek. A malformed or very large capture will OOM or hang indefinitely. | `phase2_protocol.py`, `utils/zeek.py` | 🔲 Sprint 11B |
+| M5 | JA3 list is static with no update mechanism and no per-entry provenance. No reference to original source for each hash. | `phase6_ioc_enrichment.py` | ✅ Partially fixed Sprint 11 (bad hash removed; provenance comments added) |
+
+### LOW — Code Quality
+
+| # | Issue | File | Status |
+|---|---|---|---|
+| L1 | `warnings.filterwarnings("ignore")` suppresses ALL Python warnings globally, masking real dependency issues. | `main.py:15` | ✅ Fixed Sprint 11 (targeted filter) |
+| L2 | `false_positive_notes` field in playbook YAML is never read by scorer or reporter — FP guidance written by playbook authors is invisible in the output report. | `scorer.py`, `reporter.py` | ✅ Fixed Sprint 11 |
+| L3 | No encrypted-DNS (DoH/DoT) or IPv6 coverage — modern C2 increasingly uses DoH to bypass all DNS signal computation. | multiple | 🔲 Sprint 13 research spike |
+| L4 | `sys.path.insert` in main.py instead of proper `pyproject.toml` package — prevents `pip install -e .`, breaks imports from arbitrary working directories. | `main.py:18` | 🔲 Sprint 11B (add pyproject.toml) |
+
+---
+
+## README Accuracy Audit (2026-05-12)
+
+Live test run against `28-02-sample.pcap` with `--max-iocs 5` (online mode, all APIs enabled).
+Total runtime: **79.4 seconds** (69.4s in Phase 6 alone).
+
+### Verified Claims ✅
+
+| Claim | Result |
+|---|---|
+| 30 MITRE ATT&CK TTPs in playbooks | ✅ Confirmed — 30 loaded, all scored |
+| Suricata boost +0.10 to TTP score on signature match | ✅ Confirmed in phase3_ttp_sweep.py |
+| VT rate limit 4 req/min (16s interval) | ✅ Confirmed — vt_client.py `_MIN_INTERVAL=15.0` |
+| All 4 output files produced (report.md, findings.json, anomalies.json, wireshark_filters.md) | ✅ Confirmed |
+| Victim identification: IP, hostname, MAC, user, domain | ✅ Confirmed across all 5 verified PCAPs |
+| C2 IP `45.131.214.85` confirmed MALICIOUS: VT 12 engines, ThreatFox `NetSupportManager RAT` | ✅ Online mode working |
+| `anomalies.json` contains `ai_prompt` and `ai_hypothesis` fields | ✅ Fields present (hypothesis empty if quota exhausted) |
+| false_positive_notes from playbook YAML surfaced in report | ✅ Fixed Sprint 11 |
+| confidence_ceiling enforced by scorer | ✅ Fixed Sprint 11 |
+| IOC "Not enriched" note for IPs beyond max-iocs limit | ✅ Present but wording misleading — see gap R7 |
+
+### False or Misleading Claims ❌
+
+| # | Claim in README | Reality | Fix Sprint |
+|---|---|---|---|
+| R1 | "in under 15 seconds" (headline, README line 2) | TRUE only offline. Online with 5 IPs = **79s** (VT adds 16s/IP). 10 IPs = ~160s, 20 IPs = ~320s. | ✅ Fixed Sprint 11A — "under 2 minutes on a laptop" |
+| R2 | "four independent detection layers" (detection layer table) | **Five** layers exist: Behavioral (Playbooks), Signatures (Suricata), Beacon Scoring, JA3, AND **Sigma** (added Sprint 9B). Sigma is completely absent from the README detection matrix. | ✅ Fixed Sprint 11A — Sigma row added; header updated to "five" |
+| R3 | RITA "4-factor composite: **jitter, skew, top-connected, connections/hour** + FFT" | These are RITA's original factor names. Actual implementation uses: **interval_score** (CV of IATs), **size_score** (CV of payload bytes), **freq_score** (histogram fraction near modal interval), **persist_score** (duration/4h). "Skew" and "top-connected" are not computed; "connections/hour" is not the persist formula. | ✅ Fixed Sprint 11A — table and inline description updated to actual factor names |
+| R4 | "IPs from TTP findings ← VirusTotal + ThreatFox (prioritised)" (IOC Enrichment table) | `_priority_ips()` in phase6 uses `scan_candidates`, `top_talkers`, and `ctx.external_ips` — not TTP finding objects. No code path extracts IPs directly from `TTPScore` results. | Correct IOC enrichment description or implement the TTP-IP extraction |
+| R5 | "AI analysis" in the Anomaly Layer row of Detection Coverage Matrix | Previously a lie — no LLM was called. **Fixed Sprint 11**: Gemini integration now wired. Hypothesis appears in report and `anomalies.json` when key is set and quota available. | ✅ Fixed |
+| R6 | "Max 20 IPs per run" (IOC section) | `MAX_IPS=20` in phase6 code, but CLI default is `--max-iocs 10`. README says 20; tool defaults to 10. | ✅ Fixed Sprint 11A — README updated to "default 10 (configurable with --max-iocs)" |
+| R7 | "Not enriched (run without `--offline`)" note for un-enriched IPs | Message fires even in online mode when max-iocs limit is hit. Wrong cause stated. | Fix message to say "max-iocs limit reached" vs "run offline" |
+
+### Output Content Gaps (what README claims outputs contain vs what they actually contain)
+
+| Gap | File | Description | Fix |
+|---|---|---|---|
+| G1 | `anomalies.json` | Previously had no `ai_hypothesis` field | ✅ Fixed Sprint 11 |
+| G2 | `report.md` Anomaly section | Previously showed no Gemini output | ✅ Fixed Sprint 11 (rendered as `🤖 Gemini Analysis` block) |
+| G3 | `report.md` findings | `false_positive_notes` from YAML invisible to analyst | ✅ Fixed Sprint 11 (rendered as blockquote) |
+| G4 | `report.md` findings | `confidence_ceiling` cap invisible — analyst couldn't know CONFIRMED was intentionally blocked | ✅ Fixed Sprint 11 (ceiling enforced in scorer) |
+| G5 | Detection Coverage Matrix (README) | Sigma layer completely absent despite being a functional detection path | ✅ Fixed Sprint 11A — Sigma row added to detection layers table |
+
+### Online Mode Test Results (2026-05-12, `28-02-sample.pcap`)
+
+```
+Runtime breakdown:
+  Phase 1 Orientation:   1.7s
+  Phase 2 Protocol:      1.6s
+  Phase 2.5 Suricata:    3.0s
+  Phase 3 TTP Sweep:     0.1s
+  Phase 4 Deep Dive:     0.0s
+  Phase 5 Artifacts:     0.6s
+  Phase 6 IOC Enrich:   69.4s  ← 5 IPs × ~16s VT interval
+  Phase 7 Anomaly:       3.0s  ← Gemini retry (quota exhausted)
+  Report:                0.0s
+  TOTAL:                79.4s
+
+VT confirmed:  45.131.214.85  → 12 malicious engines
+ThreatFox:     45.131.214.85  → NetSupportManager RAT (confidence not shown in log)
+Anomalies:     2 detected (dns_nxdomain_pattern, high_http_post_volume)
+Gemini:        QUOTA EXHAUSTED — free tier limit: 0 requests/day on this key
+               Retry logic fired once (32s delay), then failed gracefully
+```
+
+**Gemini quota note (Sprint 11A update)**: Switched to `GOOGLE_API_GENERAL_KEY` (primary) with `GOOGLE_API_KEY` as fallback, and model updated to `gemini-3.1-flash-lite`. The `GOOGLE_API_GENERAL_KEY` has active quota on `gemini-3.1-flash-lite` and is confirmed working. `gemini-2.0-flash` on both keys has `limit: 0` on the free tier.
+
+---
+
 ## Planned Work
 
 ### Now — Verification Sprint (BLOCKING)
@@ -168,11 +282,12 @@
 - [x] JA3 section in report (active/inactive status, match table)
 - [ ] Add `tls_unique_ja3_count` signal to T1573.001 playbook (deferred — playbook already fires correctly)
 
-### Sprint 9B — Sigma Rules
-- [ ] Shallow clone `SigmaHQ/sigma` (network/zeek rules only)
-- [ ] Install `sigma-cli` + pySigma Zeek backend
-- [ ] `utils/sigma.py` — convert rules, run against Zeek logs, map hits to ATT&CK
-- [ ] Feed results as signal boosters (like Suricata does)
+### Sprint 9B — Sigma Rules ✅ COMPLETE
+- [x] Sparse clone `SigmaHQ/sigma` — 21 network/zeek rules in `sigma/rules/network/zeek/`
+- [x] Install `sigma-cli` + pySigma (no Zeek backend exists — built custom DataFrame evaluator)
+- [x] `utils/sigma.py` — parses Sigma YAML via pySigma, evaluates conditions against Zeek DataFrames
+- [x] Feed results as signal boosters in Phase 3 (same +0.10 boost mechanic as Suricata)
+- [x] Phase 2.6 in main.py + Sigma Rule Scan section in report
 
 ### Sprint 9C — RITA Docker Wrapper
 - [ ] `docker-compose.yml` for RITA + MongoDB

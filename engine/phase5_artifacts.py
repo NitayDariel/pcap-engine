@@ -197,7 +197,10 @@ def _cert_anomalies(row: dict, reference_ts: float = 0.0) -> list[str]:
     subject = str(row.get("certificate.subject", ""))
     issuer = str(row.get("certificate.issuer", ""))
 
-    if subject == issuer:
+    is_ca = bool(row.get("basic_constraints.ca", False))
+    # Root CAs always have subject==issuer by specification — not anomalous.
+    # Flag self-signed only for end-entity (non-CA) certs, or CAs with suspicious subjects.
+    if subject == issuer and not is_ca:
         anomalies.append("self-signed")
 
     not_after = float(row.get("certificate.not_valid_after", 0))
@@ -207,7 +210,6 @@ def _cert_anomalies(row: dict, reference_ts: float = 0.0) -> list[str]:
     if not_after > 0 and check_ts > 0 and not_after < check_ts:
         anomalies.append("expired_at_capture_time")
 
-    is_ca = bool(row.get("basic_constraints.ca", False))
     if not is_ca and not_after - not_before > _TEN_YEARS_SECS:
         # Only flag unusually long validity for end-entity certs — root/intermediate CAs are expected
         anomalies.append("unusually_long_validity_leaf_cert")

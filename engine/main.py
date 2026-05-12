@@ -12,7 +12,13 @@ import time
 import warnings
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
+# Suppress only well-understood noisy warnings from optional dependencies.
+# Do NOT use a blanket ignore — real warnings from our own code must surface.
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
+warnings.filterwarnings("ignore", category=FutureWarning, module="numpy")
+warnings.filterwarnings("ignore", message=".*Unverified HTTPS.*")       # urllib3 dev noise
+warnings.filterwarnings("ignore", message=".*google.*Python version.*") # google SDK on py3.9
+warnings.filterwarnings("ignore", message=".*end of life.*")            # google SDK eol notice
 
 # Add project root to path so `engine.*` imports resolve
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,6 +27,7 @@ from engine import phase1_orientation, phase2_protocol, phase3_ttp_sweep
 from engine import phase4_deep_dive, phase5_artifacts, phase6_ioc_enrichment, phase7_anomaly, reporter
 from engine import wireshark_export
 from engine.utils.suricata import run as suricata_run, is_available as suricata_available
+from engine.utils.sigma import run as sigma_run
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,7 +47,14 @@ Examples:
     p.add_argument("--output-dir", default=None, help="Output directory for report + JSON files")
     p.add_argument("--zeek-logs", default=None, help="Pre-existing Zeek log directory (skip re-running Zeek)")
     p.add_argument("--offline", action="store_true", help="Skip all external API calls (VT, ThreatFox)")
-    p.add_argument("--no-ai", action="store_true", help="Skip AI anomaly hypothesis layer")
+    p.add_argument(
+        "--no-anomaly", action="store_true",
+        help="Skip Phase 7 anomaly detection (heuristic pattern flagging, no LLM call)",
+    )
+    p.add_argument(
+        "--no-ai", action="store_true",
+        help=argparse.SUPPRESS,  # kept for backwards-compat; identical to --no-anomaly
+    )
     p.add_argument("--max-iocs", type=int, default=10, help="Max IPs to enrich via VT/ThreatFox (default: 10)")
     p.add_argument("--playbooks", default=None, help="Path to playbooks directory")
     p.add_argument("--no-suricata", action="store_true", help="Skip Suricata signature scan")
@@ -116,10 +130,30 @@ def main() -> None:
     elif not args.no_suricata:
         print("[Phase 2.5] Suricata — not installed, skipping (brew install suricata)\n")
 
+    # ── Phase 2.6: Sigma Rule Scan ────────────────────────────────────────
+    print("[Phase 2.6] Sigma — evaluating network/zeek rules...")
+    t0 = time.time()
+    sigma_result = sigma_run(signals.zeek_log_dir)
+    if not sigma_result.available:
+        print(f"          Sigma unavailable: {sigma_result.error}")
+    elif sigma_result.hits:
+        techniques_str = ", ".join(sorted(sigma_result.techniques)) or "none"
+        print(
+            f"          {sigma_result.rules_evaluated} rules evaluated · "
+            f"{len(sigma_result.hits)} hit(s) · "
+            f"Techniques: {techniques_str}"
+        )
+    else:
+        print(f"          {sigma_result.rules_evaluated} rules evaluated · No hits")
+    print(f"          Done in {time.time()-t0:.1f}s\n")
+
     # ── Phase 3: TTP Sweep ────────────────────────────────────────────────
     print("[Phase 3] TTP sweep — parallel scoring all playbooks...")
     t0 = time.time()
-    ttp_scores = phase3_ttp_sweep.run(ctx, signals, playbook_dir=playbook_dir, suricata_result=suricata_result)
+    ttp_scores = phase3_ttp_sweep.run(
+        ctx, signals, playbook_dir=playbook_dir,
+        suricata_result=suricata_result, sigma_result=sigma_result,
+    )
     print(f"          Done in {time.time()-t0:.1f}s\n")
 
     # ── Phase 4: Deep Dive ────────────────────────────────────────────────
@@ -174,7 +208,8 @@ def main() -> None:
     print(f"          Done in {time.time()-t0:.1f}s\n")
 
     # ── Phase 7: Anomaly Layer ────────────────────────────────────────────
-    if not args.no_ai:
+    skip_anomaly = getattr(args, "no_anomaly", False) or getattr(args, "no_ai", False)
+    if not skip_anomaly:
         print("[Phase 7] Anomaly layer — identifying uncategorised patterns...")
         t0 = time.time()
         anomalies = phase7_anomaly.run(ctx, signals, ttp_scores)
@@ -189,6 +224,7 @@ def main() -> None:
         suricata_result=suricata_result,
         artifact_result=artifact_result,
         ja3_hits=ja3_hits,
+        sigma_result=sigma_result,
     )
     paths = reporter.write(report_md, ttp_scores, anomalies, out_dir)
 

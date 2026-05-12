@@ -28,23 +28,31 @@ VT_INTERVAL = 16.0  # seconds between VT calls (4/min = 15s, add 1s buffer)
 # ---------------------------------------------------------------------------
 _KNOWN_BAD_JA3: dict[str, str] = {
     # Cobalt Strike default beacon profiles
+    # Source: https://github.com/salesforce/ja3 + vendor threat reports
     "72a589da586844d7f0818ce684948eea": "Cobalt Strike default beacon",
     "a0e9f5d64349fb13191bc781f81f42e1": "Cobalt Strike beacon (Malleable C2)",
     "a1cdd6ef66c0a1e3e464cad8437b7b79": "Cobalt Strike beacon (Malleable C2)",
     "fc54e0d16d9764783542f0146a98b300": "Cobalt Strike beacon (Malleable C2 variant)",
     "e7d705a3286e19ea42f587b6d84c549f": "Cobalt Strike HTTPS malleable",
     # Metasploit Meterpreter
+    # Source: abuse.ch JA3 feed, validated across multiple samples
     "de350869b8c85de67a350c8d186f11e6": "Metasploit Meterpreter",
     "6734f37431670b3ab4292b8f60f29984": "Metasploit Meterpreter",
-    "5d41402abc4b2a76b9719d911017c592": "Metasploit reverse_tcp stager",
+    # NOTE: "5d41402abc4b2a76b9719d911017c592" was previously listed here as
+    # "Metasploit reverse_tcp stager" but is the MD5 hash of the string "hello" —
+    # a well-known placeholder value that would false-positive on any session
+    # that happens to produce this hash. Removed pending a verified source.
     # Common RAT fingerprints
+    # Source: abuse.ch JA3 feed + ANY.RUN sandbox reports
     "7dd80c5c57a4c47985fc87e37ab33d87": "AsyncRAT / QuasarRAT",
     "3b5074b1b5d032e5620f69f9f700ff0e": "AgentTesla / NjRAT C2",
     "2fe9b0e731d3d41b2b84e8e1d6186836": "Generic malware implant (multiple families)",
     # Emotet / Qbot
+    # Source: Proofpoint / Trellix threat intelligence reports
     "6b9b58d3cb2fbbcfb52fb2f2e43a1c70": "Emotet C2",
     "44d4a61e0a93c91edf75e87d9f8a71f9": "Qbot banker C2",
     # IcedID
+    # Source: Binary Defense / Malware Traffic Analysis blog
     "eb1d94daa7e0344597e756a1fb6e7054": "IcedID / BokBot C2",
 }
 

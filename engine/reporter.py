@@ -24,6 +24,15 @@ from engine.utils.zeek import parse_log
 CONFIDENCE_ORDER = {"CONFIRMED": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "ANOMALY": 4}
 DEEP_DIVE_THRESHOLD = 0.60
 
+# Protocol names that are Wireshark/Zeek internals — not meaningful to an analyst
+_NOISE_PROTOCOLS = frozenset({
+    "_ws.malformed", "data", "data-text-lines", "epm", "browser",
+    "frame", "eth", "ip", "tcp", "udp", "icmp", "raw",
+})
+
+# Canonical playbook count — update when playbooks/ directory changes
+_TOTAL_PLAYBOOKS = 30
+
 
 def _score_bar(score: float, width: int = 20) -> str:
     filled = int(score * width)
@@ -256,8 +265,9 @@ def _prose_executive_summary(
     ttp_scores: list[TTPScore],
     victim: dict,
     ioc_results: dict[str, IOCResult],
+    suricata_result=None,
 ) -> str:
-    """Generate a plain-language narrative: when, who, what."""
+    """Generate a plain-language narrative: what, who, when."""
     high_conf = [r for r in ttp_scores if r.confidence in ("CONFIRMED", "HIGH")]
     medium_conf = [r for r in ttp_scores if r.confidence == "MEDIUM"]
     low_conf = [r for r in ttp_scores if r.confidence == "LOW"]
@@ -275,51 +285,110 @@ def _prose_executive_summary(
     victim_ref = victim.get("ip") or "unknown host"
     if victim.get("hostname"):
         victim_ref = f"{victim['hostname']} ({victim_ref})"
-
-    # What happened — highest confidence findings first
-    top = sorted(ttp_scores, key=lambda r: (CONFIDENCE_ORDER.get(r.confidence, 99), -r.score))
-    activities = [r.name for r in top[:4]]
+    if victim.get("user"):
+        victim_ref += f" · user **{victim['user']}**"
 
     lines = []
 
-    # Narrative paragraph
-    if high_conf:
-        severity = "high-severity activity"
-    elif medium_conf:
-        severity = "medium-severity activity"
-    else:
-        severity = "low-severity activity"
+    # Lead with primary finding: Suricata malware family OR highest-confidence TTP
+    primary_label = None
+    if suricata_result and suricata_result.available and suricata_result.alerts:
+        # Extract malware family name from alert signatures (look for Win32/X or just "MALWARE X")
+        for alert in suricata_result.alerts:
+            sig = alert.signature or ""
+            import re as _re
+            m = _re.search(r'(Win\d+/[\w\s]+?\w)', sig)
+            if m:
+                primary_label = m.group(1).strip()
+                break
+            m = _re.search(r'ET MALWARE ([\w\s/]+?) (?:C2|Related|Victim|CnC)', sig)
+            if m:
+                primary_label = m.group(1).strip()
+                break
 
+    top = sorted(ttp_scores, key=lambda r: (CONFIDENCE_ORDER.get(r.confidence, 99), -r.score))
+
+    if primary_label:
+        lines.append(f"**Malware identified: {primary_label}** · Host: **{victim_ref}**")
+    elif high_conf:
+        lines.append(f"**{high_conf[0].name}** detected on **{victim_ref}**")
+    else:
+        lines.append(f"Suspicious activity on **{victim_ref}**")
+
+    # Context: capture window + tactic spread
+    tactic_count = len(set(r.category for r in ttp_scores))
+    severity_word = "high-severity" if high_conf else ("medium-severity" if medium_conf else "low-severity")
     lines.append(
-        f"During the capture window **{window}**, "
-        f"host **{victim_ref}** exhibited {severity} across "
-        f"**{len(set(r.category for r in ttp_scores))} MITRE tactic categories**. "
+        f"Capture window: **{window}** · "
+        f"{severity_word} activity across **{tactic_count} MITRE tactic area(s)**."
     )
 
-    if activities:
-        joined = "; ".join(activities[:3])
-        if len(top) > 3:
-            joined += f"; and {len(top) - 3} additional finding(s)"
-        lines.append(f"Observed techniques include: {joined}.")
+    # Top techniques (skip the primary if already shown)
+    technique_names = [r.name for r in top if not (primary_label and r == top[0])][:3]
+    if technique_names:
+        lines.append("Additional techniques: " + "; ".join(technique_names) + ("." if len(top) <= 4 else f"; and {len(top)-3} more."))
 
     if confirmed_malicious:
         lines.append(
-            f"**{len(confirmed_malicious)} external IP(s) confirmed malicious** via threat intelligence: "
+            f"**{len(confirmed_malicious)} C2 IP(s) confirmed malicious**: "
             + ", ".join(f"`{ip}`" for ip in confirmed_malicious) + "."
         )
 
     # Confidence breakdown
     parts = []
     if high_conf:
-        parts.append(f"**{len(high_conf)} HIGH/CONFIRMED**")
+        parts.append(f"**{len(high_conf)} HIGH**")
     if medium_conf:
         parts.append(f"**{len(medium_conf)} MEDIUM**")
     if low_conf:
         parts.append(f"**{len(low_conf)} LOW**")
     if parts:
-        lines.append(f"Finding breakdown: {', '.join(parts)}.")
+        lines.append(f"Finding breakdown: {', '.join(parts)} ({len(ttp_scores)} total).")
 
     return "\n\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Evidence formatter — strips Zeek internals, humanises timestamps/field names
+# ---------------------------------------------------------------------------
+
+_FIELD_RENAMES = {
+    "id.orig_h": "src", "id.orig_p": "src_port",
+    "id.resp_h": "dst", "id.resp_p": "dst_port",
+}
+_SKIP_FIELDS = {"uid", "proto"}
+_ARRAY_PREVIEW_LIMIT = 6
+
+
+def _format_evidence(entries: list) -> str:
+    """Convert raw Zeek evidence dicts into a readable text block."""
+    import datetime as _dt
+
+    lines = []
+    for i, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            lines.append(str(entry))
+            continue
+        if len(entries) > 1:
+            lines.append(f"[{i}]")
+        for k, v in entry.items():
+            if k in _SKIP_FIELDS:
+                continue
+            label = _FIELD_RENAMES.get(k, k.replace("_", " "))
+            # Humanise epoch timestamps
+            if k == "ts" and isinstance(v, (int, float)) and v > 1e9:
+                try:
+                    v = _dt.datetime.fromtimestamp(v).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
+            # Truncate long arrays — show count, not a string element inside the list
+            if isinstance(v, list) and len(v) > _ARRAY_PREVIEW_LIMIT:
+                overflow = len(v) - _ARRAY_PREVIEW_LIMIT
+                v = f"{v[:_ARRAY_PREVIEW_LIMIT]} (+{overflow} more)"
+            lines.append(f"  {label}: {v}")
+        if i < len(entries):
+            lines.append("")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -344,15 +413,21 @@ def _finding_block(
     lines.append("")
 
     if result.signals_fired:
+        # Strip _weak suffix — it's a scoring-tier detail, not meaningful in the report
+        _fired_display = [s[:-5] if s.endswith("_weak") else s for s in result.signals_fired]
         lines.append(f"**Signals fired** ({len(result.signals_fired)}): "
-                     f"`{'`, `'.join(result.signals_fired)}`")
-        lines.append(f"**Categories hit**: `{'`, `'.join(sorted(result.categories_hit))}`")
+                     f"`{'`, `'.join(_fired_display)}`")
 
     if result.raw_values:
-        lines.append("\n**Raw signal values:**")
+        lines.append("\n**Indicators:**")
         for k, v in result.raw_values.items():
+            # Skip zero/false values that didn't contribute to the score
+            if v == 0 or v is False or v == "False" or v == "0":
+                continue
             if isinstance(v, float):
                 lines.append(f"- `{k}` = `{v:.4f}`")
+            elif v is True or v == 1 or v == "True":
+                lines.append(f"- `{k}` — detected")
             else:
                 lines.append(f"- `{k}` = `{v}`")
 
@@ -360,9 +435,12 @@ def _finding_block(
         lines.append(f"\n**Deep dive summary**: {deep_dive.summary}")
         if deep_dive.evidence:
             lines.append("\n**Evidence (top entries):**")
-            lines.append("```json")
-            lines.append(json.dumps(deep_dive.evidence[:3], indent=2, default=str))
             lines.append("```")
+            lines.append(_format_evidence(deep_dive.evidence[:3]))
+            lines.append("```")
+
+    if result.fp_notes:
+        lines.append(f"\n> **False-positive guidance**: {result.fp_notes}")
 
     lines.append("")
     return "\n".join(lines)
@@ -382,6 +460,7 @@ def generate(
     suricata_result=None,   # Optional[SuricataResult]
     artifact_result=None,   # Optional[ArtifactResult]
     ja3_hits=None,          # Optional[list[JA3Result]]
+    sigma_result=None,      # Optional[SigmaResult]
 ) -> str:
     """Generate the full Markdown report as a string."""
 
@@ -421,7 +500,7 @@ def generate(
 
     # ── Executive Summary ─────────────────────────────────────────────────
     lines.append(_section("Executive Summary"))
-    lines.append(_prose_executive_summary(ctx, ttp_scores, victim, ioc_results))
+    lines.append(_prose_executive_summary(ctx, ttp_scores, victim, ioc_results, suricata_result=suricata_result))
     lines.append("")
 
     # ── Victim Details ────────────────────────────────────────────────────
@@ -433,7 +512,12 @@ def generate(
     lines.append(f"| **MAC Address** | `{victim['mac'] or 'unknown'}` |")
     lines.append(f"| **Windows User** | `{victim['windows_user'] or 'unknown'}` |")
     lines.append(f"| **Domain** | `{victim['domain'] or 'unknown'}` |")
-    lines.append(f"| **Internal hosts** | {', '.join(f'`{ip}`' for ip in sorted(ctx.internal_ips))} |")
+    # Filter out broadcast, multicast, link-local — only meaningful unicast internal hosts
+    _meaningful_internal = sorted(
+        ip for ip in ctx.internal_ips
+        if ip not in ("0.0.0.0",) and not ip.startswith("169.254.") and not ip.endswith(".255")
+    )
+    lines.append(f"| **LAN segment** | {', '.join(f'`{ip}`' for ip in _meaningful_internal) or 'unknown'} |")
     lines.append("")
 
     # ── Indicators of Compromise ──────────────────────────────────────────
@@ -442,17 +526,32 @@ def generate(
     lines.append("**IP Addresses**")
     lines.append("")
     if iocs["ips"]:
-        lines.append("| IP | Enrichment |")
-        lines.append("|---|---|")
-        for ip in iocs["ips"]:
-            r = ioc_results.get(ip)
-            if r and r.is_confirmed_malicious:
-                enrich = f"**MALICIOUS** — VT:{r.vt_malicious} engines · {r.threatfox_malware or 'threat confirmed'}"
-            elif r:
-                enrich = f"VT:{r.vt_malicious} detections"
-            else:
-                enrich = "not enriched (offline or not queried)"
-            lines.append(f"| `{ip}` | {enrich} |")
+        enriched_ips = [(ip, ioc_results[ip]) for ip in iocs["ips"] if ip in ioc_results]
+        unenriched_ips = [ip for ip in iocs["ips"] if ip not in ioc_results]
+
+        if enriched_ips:
+            lines.append("| IP | Enrichment |")
+            lines.append("|---|---|")
+            for ip, r in enriched_ips:
+                if r.is_confirmed_malicious:
+                    enrich = (
+                        f"**MALICIOUS** — VT:{r.vt_malicious} engines"
+                        + (f" · {r.threatfox_malware}" if r.threatfox_malware else "")
+                    )
+                else:
+                    enrich = f"VT:{r.vt_malicious} detections"
+                lines.append(f"| `{ip}` | {enrich} |")
+            if unenriched_ips:
+                lines.append("")
+                lines.append(
+                    "_Not enriched (max-iocs limit reached — increase with `--max-iocs`): "
+                    + " · ".join(f"`{ip}`" for ip in unenriched_ips) + "_"
+                )
+        else:
+            # No enrichment data — clean flat list, one line
+            lines.append(" · ".join(f"`{ip}`" for ip in iocs["ips"]))
+            lines.append("")
+            lines.append("_Run without `--offline` for VirusTotal / ThreatFox enrichment._")
     else:
         lines.append("_No external IOC IPs extracted._")
     lines.append("")
@@ -471,13 +570,31 @@ def generate(
     # Prefer artifact_result hashes (richer), fall back to zeek files.log hashes
     artifact_hashes = (artifact_result.extracted_files if artifact_result else [])
     if artifact_hashes:
-        lines.append("| SHA256 | Filename | MIME | Protocol | Size |")
-        lines.append("|---|---|---|---|---|")
-        for f in artifact_hashes[:15]:
+        # Deduplicate by sha256 — group identical hashes, show representative filename + count
+        from collections import defaultdict as _defaultdict
+        _hash_groups: dict = _defaultdict(list)
+        for _f in artifact_hashes:
+            _hash_groups[_f.sha256].append(_f)
+        _unique_hashes = sorted(_hash_groups.items(), key=lambda x: -len(x[1]))
+        total_unique = len(_unique_hashes)
+        total_files = len(artifact_hashes)
+        if total_unique < total_files:
             lines.append(
-                f"| `{f.sha256[:20]}...` | `{f.filename[:30]}` "
-                f"| {f.mime_type} | {f.protocol} | {_fmt_bytes(f.size_bytes)} |"
+                f"_{total_files} files extracted · {total_unique} unique hash(es) "
+                f"({total_files - total_unique} duplicates collapsed)_\n"
             )
+        lines.append("| SHA256 | File | Count | MIME | Size |")
+        lines.append("|---|---|---|---|---|")
+        for _sha, _files in _unique_hashes[:15]:
+            _first = _files[0]
+            _fname = _first.filename[:35]
+            _count = f"×{len(_files)}" if len(_files) > 1 else "1"
+            lines.append(
+                f"| `{_sha[:20]}…` | `{_fname}` | {_count} "
+                f"| {_first.mime_type} | {_fmt_bytes(_first.size_bytes)} |"
+            )
+        if len(_unique_hashes) > 15:
+            lines.append(f"_… and {len(_unique_hashes) - 15} more unique hashes_")
     elif iocs["hashes"]:
         lines.append("| SHA256 | MIME | Source IP |")
         lines.append("|---|---|---|")
@@ -488,13 +605,14 @@ def generate(
     lines.append("")
 
     # ── Coverage ──────────────────────────────────────────────────────────
+    _visible_protos = [p for p in sorted(ctx.protocols_present) if p not in _NOISE_PROTOCOLS]
     lines.append(_section("Coverage"))
     lines.append(f"| Metric | Value |")
     lines.append(f"|---|---|")
     lines.append(f"| Visibility | **{ctx.visibility_pct}%** analyzable ({ctx.encrypted_pct}% encrypted) |")
-    lines.append(f"| TTPs checked | {len(ttp_scores) + sum(1 for r in ttp_scores if r.skipped)} |")
-    lines.append(f"| TTPs fired | {len(ttp_scores)} |")
-    lines.append(f"| Protocols present | {', '.join(sorted(ctx.protocols_present)[:12])} |")
+    lines.append(f"| Playbooks evaluated | {_TOTAL_PLAYBOOKS} |")
+    lines.append(f"| Findings (above threshold) | {len(ttp_scores)} |")
+    lines.append(f"| Protocols observed | {', '.join(_visible_protos[:15]) or 'unknown'} |")
     lines.append(f"| External hosts | {len(ctx.external_ips)} |")
     lines.append(f"| Whitelist cleared | {len(ctx.whitelist.cleared_ips) if ctx.whitelist else 0} IPs |")
     lines.append(f"| IOCs enriched | {len(ioc_results)} IPs |")
@@ -578,6 +696,34 @@ def generate(
             lines.append(f"| {ja3_display} | {ja3s_display} | {label} | {conn} | {sni} |")
         lines.append("")
 
+    # ── Sigma Rule Hits ───────────────────────────────────────────────────
+    lines.append(_section("Sigma Rule Scan"))
+    if sigma_result is None or not sigma_result.available:
+        err = getattr(sigma_result, "error", "") if sigma_result else ""
+        lines.append(
+            f"_Sigma unavailable{': ' + err if err else ''}. "
+            "Install with: `pip3 install sigma-cli`_\n"
+        )
+    elif not sigma_result.hits:
+        lines.append(
+            f"_Sigma scanned {sigma_result.rules_evaluated} network/zeek rules — no matches._\n"
+        )
+    else:
+        hi = len(sigma_result.high_hits)
+        total_hits = len(sigma_result.hits)
+        techniques = ", ".join(f"`{t}`" for t in sorted(sigma_result.techniques)) or "none"
+        lines.append(
+            f"**{total_hits} rule(s) matched** — {hi} high-severity · "
+            f"MITRE techniques: {techniques}\n"
+        )
+        lines.append("| Level | Rule | Log | Matches | Src IPs |")
+        lines.append("|---|---|---|---|---|")
+        for h in sorted(sigma_result.hits, key=lambda x: {"high": 0, "medium": 1, "low": 2}.get(x.level, 3)):
+            sev = {"high": "**HIGH**", "medium": "MEDIUM", "low": "low"}.get(h.level, h.level)
+            src = " · ".join(f"`{ip}`" for ip in h.sample_src_ips[:2]) or "—"
+            lines.append(f"| {sev} | {h.rule_title} | {h.log_type} | {h.match_count} | {src} |")
+        lines.append("")
+
     # ── Suricata Signature Alerts ─────────────────────────────────────────
     lines.append(_section("Suricata Signature Scan"))
     if suricata_result is None or not suricata_result.available:
@@ -598,18 +744,30 @@ def generate(
         lines.append(
             f"**{total} alert(s)** — {hi} high-severity · MITRE techniques: {techniques}\n"
         )
-        lines.append("| Src | Dst | Severity | Technique | Signature |")
-        lines.append("|---|---|---|---|---|")
-        # Show top 15 — prioritise high severity then unique signatures
-        shown = sorted(suricata_result.alerts, key=lambda a: a.severity)[:15]
-        for a in shown:
-            sev_label = {1: "**HIGH**", 2: "MEDIUM", 3: "low"}.get(a.severity, str(a.severity))
-            tech = f"`{a.mitre_technique}`" if a.mitre_technique else "—"
-            sig = a.signature[:60] + ("…" if len(a.signature) > 60 else "")
+        # Deduplicate: group by (src_ip, dst_ip, signature), keep worst severity + count
+        _seen_sigs: dict = {}
+        for _a in sorted(suricata_result.alerts, key=lambda a: a.severity):
+            _key = (_a.src_ip, _a.dst_ip, _a.signature)
+            if _key not in _seen_sigs:
+                _seen_sigs[_key] = [_a, 1]
+            else:
+                _seen_sigs[_key][1] += 1
+                if _a.severity < _seen_sigs[_key][0].severity:
+                    _seen_sigs[_key][0] = _a  # keep highest-severity instance
+        _deduped = sorted(_seen_sigs.values(), key=lambda x: x[0].severity)[:15]
+        lines.append("| Src | Dst | Sev | Count | Technique | Signature |")
+        lines.append("|---|---|---|---|---|---|")
+        for _a, _cnt in _deduped:
+            sev_label = {1: "**HIGH**", 2: "MEDIUM", 3: "low"}.get(_a.severity, str(_a.severity))
+            tech = f"`{_a.mitre_technique}`" if _a.mitre_technique else "—"
+            sig = _a.signature[:55] + ("…" if len(_a.signature) > 55 else "")
+            _cnt_str = f"×{_cnt}" if _cnt > 1 else "1"
             lines.append(
-                f"| `{a.src_ip}:{a.src_port}` | `{a.dst_ip}:{a.dst_port}` "
-                f"| {sev_label} | {tech} | {sig} |"
+                f"| `{_a.src_ip}:{_a.src_port}` | `{_a.dst_ip}:{_a.dst_port}` "
+                f"| {sev_label} | {_cnt_str} | {tech} | {sig} |"
             )
+        if len(_seen_sigs) > 15:
+            lines.append(f"_… {len(_seen_sigs) - 15} more unique signatures_")
         lines.append("")
 
     # ── Findings ──────────────────────────────────────────────────────────
@@ -682,6 +840,8 @@ def generate(
             lines.append(f"#### {a.anomaly_id} — {a.anomaly_type}")
             lines.append(f"{a.description}")
             lines.append(f"\n> **Reason not classified**: {a.reason_not_classified}")
+            if a.ai_hypothesis:
+                lines.append(f"\n**🤖 Gemini Analysis**\n\n{a.ai_hypothesis}")
             lines.append("")
 
     # ── Top Talkers ───────────────────────────────────────────────────────
@@ -700,7 +860,7 @@ def generate(
     lines.append(
         f"- **TLS opacity**: {ctx.encrypted_pct}% of traffic is encrypted — payload unreadable\n"
         f"- **No baseline**: thresholds are absolute, not relative to this environment's normal\n"
-        f"- **Playbook coverage**: {len(ttp_scores)} TTPs checked — novel techniques not covered will silently miss\n"
+        f"- **Playbook coverage**: {_TOTAL_PLAYBOOKS} playbooks evaluated — novel techniques outside this set will silently miss\n"
         f"- **JA3 fingerprinting**: {'Active — known-bad hash list checked' if ja3_hits is not None else 'Zeek JA3 package not installed'}\n"
     )
 
@@ -747,6 +907,7 @@ def write(
             "description": a.description,
             "raw_signals": a.raw_signals,
             "ai_prompt": a.ai_prompt,
+            "ai_hypothesis": a.ai_hypothesis,
         }
         for a in anomalies
     ]

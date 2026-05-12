@@ -1,6 +1,6 @@
 # PCAP Threat Analysis Engine
 
-Automated PCAP forensics pipeline. Feed it a capture file, get a structured threat report with MITRE ATT&CK findings, IOC extraction, JA3 fingerprint hits, Wireshark filters, and artifact hashes — in under 15 seconds.
+Automated PCAP forensics pipeline. Feed it a capture file, get a structured threat report with MITRE ATT&CK findings, IOC extraction, JA3 fingerprint hits, Wireshark filters, and artifact hashes — typically in under 2 minutes on a laptop.
 
 ---
 
@@ -16,13 +16,13 @@ Triaging a suspicious PCAP manually means:
 
 A mid-complexity infection capture takes 30–90 minutes this way. A novel malware family takes longer because you don't know what to look for.
 
-This engine makes that 15 seconds.
+This engine makes that under 2 minutes.
 
 ---
 
 ## What It Detects
 
-The engine runs **four independent detection layers** over every PCAP:
+The engine runs **five independent detection layers** over every PCAP:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
@@ -36,15 +36,19 @@ The engine runs **four independent detection layers** over every PCAP:
 │  Signatures (Suricata)   │  Emerging Threats Open rules — malware family      │
 │                          │  identification, known C2 infrastructure           │
 ├──────────────────────────┼───────────────────────────────────────────────────┤
-│  Beacon Scoring (RITA)   │  4-factor composite: jitter, skew, top-connected,  │
-│                          │  connections/hour + FFT for masked beacon intervals │
+│  SIEM Rules (Sigma)      │  Community Sigma rules evaluated against Zeek      │
+│                          │  logs — network and protocol detection coverage    │
+├──────────────────────────┼───────────────────────────────────────────────────┤
+│  Beacon Scoring (RITA)   │  4-factor composite: interval CV, payload CV,      │
+│                          │  connection frequency, duration persistence         │
+│                          │  + FFT on resampled IAT for jitter-masked beacons  │
 ├──────────────────────────┼───────────────────────────────────────────────────┤
 │  TLS Fingerprinting      │  JA3/JA3S hashes matched against known-bad list:   │
 │  (JA3)                   │  Cobalt Strike, Meterpreter, common RAT clients    │
 └──────────────────────────┴───────────────────────────────────────────────────┘
 ```
 
-Results from all four layers are combined. Suricata signature hits boost TTP scores (+0.10, HIGH confidence) where a confirmed signature matches the same technique.
+Results from all five layers are combined. Suricata and Sigma hits boost TTP scores (+0.10, HIGH confidence) where a confirmed signature matches the same technique.
 
 ---
 
@@ -112,7 +116,7 @@ The 30 playbooks cover 6 MITRE ATT&CK tactic areas. Each row shows which detecti
 ```
 QUESTION                              ANSWERED BY
 ─────────────────────────────────────────────────────────────────────────────────
-Is this traffic beaconing to C2?      Beacon Scoring (RITA 4-factor + FFT jitter)
+Is this traffic beaconing to C2?      Beacon Scoring (interval CV · payload CV · frequency · persistence + FFT)
 What malware family is this?          Suricata ET Open rules + JA3 fingerprints
 Which ATT&CK techniques are in use?   30 YAML playbooks (behavioral signals)
 Are the external IPs known-bad?       VirusTotal + ThreatFox (Phase 6)
@@ -154,7 +158,7 @@ File hashes (HTTP/SMB streams)      SHA256 via tshark export
 TLS fingerprints (JA3)              Matched offline against known-bad list
 ```
 
-Rate limited to 4 VirusTotal requests/minute (free tier). Max 20 IPs per run.
+Rate limited to 4 VirusTotal requests/minute (free tier). Default 10 IPs per run (configurable with `--max-iocs`).
 
 ---
 
@@ -278,9 +282,9 @@ python engine/main.py \
   --pcap capture.pcap \
   --output-dir ./outputs/my_analysis \
   --offline \                    # skip VT/ThreatFox API calls
-  --max-iocs 10 \               # how many IPs to enrich
+  --max-iocs 10 \               # how many IPs to enrich (default: 10)
   --zeek-logs ./existing_logs \ # skip re-running Zeek
-  --no-ai \                     # skip anomaly layer
+  --no-anomaly \                # skip Phase 7 anomaly detection
   --no-suricata                 # skip Suricata scan
 ```
 
@@ -319,11 +323,12 @@ IOC IPs:
 
 ## Environment Variables
 
-For live IOC enrichment, set in `.env`:
+For live IOC enrichment and AI analysis, set in `.env`:
 
 ```
-VT_API_KEY=your_virustotal_key
-THREATFOX_API_KEY=your_threatfox_key  # optional — public API works without key
+VirusTotal_API_KEY=your_virustotal_key
+AbuseCh_API_KEY=your_threatfox_key            # optional — public API works without key
+GOOGLE_API_GENERAL_KEY=your_gemini_key        # Phase 7 AI hypothesis generation
 ```
 
 ---
@@ -349,6 +354,8 @@ pcap-engine/
 │       ├── zeek.py              # Zeek runner + log parsers (loads JA3 package)
 │       ├── tshark.py            # tshark wrappers
 │       ├── suricata.py          # Suricata offline scanner
+│       ├── sigma.py             # Sigma rule evaluator
+│       ├── gemini_client.py     # Gemini API client (anomaly hypothesis generation)
 │       ├── vt_client.py         # VirusTotal API
 │       └── abusech_client.py    # ThreatFox API
 ├── playbooks/                   # 30 YAML detection playbooks

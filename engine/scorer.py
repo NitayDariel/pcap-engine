@@ -25,6 +25,15 @@ CONFIDENCE_MEDIUM = "MEDIUM"
 CONFIDENCE_LOW = "LOW"
 CONFIDENCE_ANOMALY = "ANOMALY"
 
+# Ranking used to enforce confidence_ceiling: lower rank = higher confidence.
+_CONFIDENCE_RANK: dict[str, int] = {
+    CONFIDENCE_CONFIRMED: 0,
+    CONFIDENCE_HIGH: 1,
+    CONFIDENCE_MEDIUM: 2,
+    CONFIDENCE_LOW: 3,
+    CONFIDENCE_ANOMALY: 4,
+}
+
 
 @dataclass
 class TTPScore:
@@ -39,6 +48,7 @@ class TTPScore:
     skipped: bool = False
     skip_reason: str = ""
     raw_values: dict[str, Any] = field(default_factory=dict)
+    fp_notes: str = ""
 
 
 def _eval_threshold(value: Any, threshold_str: str) -> bool:
@@ -195,5 +205,15 @@ def score(playbook: dict, signals: ProtocolSignals, ioc_match: bool = False) -> 
     result.categories_hit = categories_hit
     result.confidence = _confidence(signals_fired, categories_hit, ioc_match)
     result.raw_values = raw_values
+
+    # Enforce confidence_ceiling: playbook authors can cap the maximum confidence
+    # their technique can achieve (e.g. "this signal is never CONFIRMED without host telemetry").
+    ceiling = playbook.get("confidence_ceiling")
+    if ceiling and ceiling in _CONFIDENCE_RANK:
+        if _CONFIDENCE_RANK.get(result.confidence, 99) < _CONFIDENCE_RANK[ceiling]:
+            result.confidence = ceiling
+
+    # Carry false-positive guidance into the score object so the reporter can surface it.
+    result.fp_notes = str(playbook.get("false_positive_notes", "")).strip()
 
     return result

@@ -25,6 +25,9 @@ tests/known_pcaps/
 sigma/
 suricata_rules/
 
+# Private Files
+0 - Important Documents/
+
 # OS / IDE
 .DS_Store
 Thumbs.db

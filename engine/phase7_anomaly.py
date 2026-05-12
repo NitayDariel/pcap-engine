@@ -1,7 +1,7 @@
 """
 Phase 7 — Anomaly Layer.
 Identifies statistically unusual flows that didn't match any TTP playbook.
-Produces structured anomaly dicts suitable for AI hypothesis prompting.
+Calls Gemini to generate hypothesis text for each anomaly when GOOGLE_API_KEY is set.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from engine.phase1_orientation import AnalysisContext
 from engine.phase2_protocol import ProtocolSignals
 from engine.scorer import TTPScore
+from engine.utils.gemini_client import is_available as gemini_available, generate_hypothesis
 
 ANOMALY_THRESHOLD = 0.35  # below this score = anomaly candidate
 
@@ -25,6 +26,7 @@ class Anomaly:
     ttps_checked: list[str] = field(default_factory=list)
     reason_not_classified: str = ""
     ai_prompt: str = ""
+    ai_hypothesis: str = ""   # populated by Gemini when GOOGLE_API_KEY is set
 
 
 def _build_ai_prompt(ctx: AnalysisContext, anomaly: Anomaly) -> str:
@@ -189,5 +191,46 @@ def run(
         a.ai_prompt = _build_ai_prompt(ctx, a)
         anomalies.append(a)
 
+    # --- Anomaly 6: Singleton suspicious domains ---
+    # Domains queried exactly once never accumulate enough queries to trigger entropy
+    # or parent-diversity thresholds. Flag them via a separate heuristic path.
+    if signals.dns_singleton_suspicious_count >= 1:
+        domains_preview = signals.dns_singleton_suspicious_domains[:10]
+        a = Anomaly(
+            anomaly_id=_new_id(),
+            anomaly_type="singleton_suspicious_domains",
+            description=(
+                f"{signals.dns_singleton_suspicious_count} domain(s) queried exactly once "
+                "match high-risk TLD, delivery keyword, or high-entropy apex patterns. "
+                f"Examples: {', '.join(domains_preview[:5])}. "
+                "Single-query domains are invisible to volume-based DNS thresholds — "
+                "these require manual triage."
+            ),
+            raw_signals={
+                "singleton_suspicious_count": signals.dns_singleton_suspicious_count,
+                "domains": domains_preview,
+                "dns_total_queries": signals.dns_packet_count,
+            },
+            ttps_checked=checked_ttps,
+            reason_not_classified=(
+                "Each domain appeared only once — below all volume and entropy thresholds. "
+                "Could be first-contact delivery, malware staging URL, or one-time C2 registration check."
+            ),
+        )
+        a.ai_prompt = _build_ai_prompt(ctx, a)
+        anomalies.append(a)
+
     print(f"  [Phase 7] {len(anomalies)} anomaly/anomalies identified for review.")
+
+    # Generate AI hypotheses via Gemini if key is available
+    if anomalies and gemini_available():
+        print(f"  [Phase 7] Calling Gemini for {len(anomalies)} hypothesis/hypotheses...")
+        for anomaly in anomalies:
+            hypothesis = generate_hypothesis(anomaly.ai_prompt)
+            if hypothesis:
+                anomaly.ai_hypothesis = hypothesis
+                print(f"  [Phase 7] {anomaly.anomaly_id} — hypothesis generated ({len(hypothesis)} chars)")
+    elif anomalies:
+        print("  [Phase 7] GOOGLE_API_KEY not set — skipping AI hypothesis generation (set key for LLM analysis)")
+
     return anomalies
