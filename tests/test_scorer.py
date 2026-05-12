@@ -270,3 +270,79 @@ def test_fp_notes_empty_when_absent():
     pb = _pb(signals=[_sig("s1", "dns_packet_count", ">= 1", 0.5, attack_category="A")])
     result = score(pb, ProtocolSignals(dns_packet_count=10))
     assert result.fp_notes == ""
+
+
+# ---------------------------------------------------------------------------
+# T1573.001 — JA3 signal integration (uses real playbook YAML)
+# ---------------------------------------------------------------------------
+
+import yaml
+from pathlib import Path
+
+_T1573_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "playbooks/c2_and_beaconing/T1573.001_tls_c2.yaml"
+)
+
+
+def _load_t1573() -> dict:
+    with open(_T1573_PATH) as f:
+        return yaml.safe_load(f)
+
+
+def test_t1573_ja3_signal_present_in_playbook():
+    pb = _load_t1573()
+    signal_ids = [s["id"] for s in pb["signals"]]
+    assert "diverse_ja3_fingerprints" in signal_ids
+
+
+def test_t1573_ja3_signal_uses_correct_source():
+    pb = _load_t1573()
+    sig = next(s for s in pb["signals"] if s["id"] == "diverse_ja3_fingerprints")
+    assert sig["source"] == "tls_unique_ja3_count"
+
+
+def test_t1573_ja3_fires_on_high_ja3_count():
+    pb = _load_t1573()
+    signals = ProtocolSignals(
+        tls_packet_count=600,
+        tls_unique_ja3_count=4,   # above threshold of 3
+        tls_missing_sni_count=0,
+        tls_cert_anomaly_count=0,
+    )
+    result = score(pb, signals)
+    assert result.score > 0.0
+
+
+def test_t1573_ja3_combo_bonus_fires():
+    """cert_anomalies + diverse_ja3_fingerprints should grant +0.10 bonus."""
+    pb = _load_t1573()
+    # Only cert_anomalies + JA3 — no missing SNI — so only the JA3 combo fires
+    signals_with_bonus = ProtocolSignals(
+        tls_packet_count=50,
+        tls_unique_ja3_count=4,
+        tls_cert_anomaly_count=5,
+        tls_missing_sni_count=0,
+    )
+    signals_no_bonus = ProtocolSignals(
+        tls_packet_count=50,
+        tls_unique_ja3_count=4,
+        tls_cert_anomaly_count=0,   # no cert anomaly → no bonus
+        tls_missing_sni_count=0,
+    )
+    with_bonus = score(pb, signals_with_bonus)
+    without_bonus = score(pb, signals_no_bonus)
+    assert with_bonus.score > without_bonus.score
+
+
+def test_t1573_ja3_zero_does_not_fire():
+    """If JA3 package absent (count=0), signal must not contribute."""
+    pb = _load_t1573()
+    signals = ProtocolSignals(
+        tls_packet_count=600,
+        tls_unique_ja3_count=0,
+        tls_missing_sni_count=0,
+        tls_cert_anomaly_count=0,
+    )
+    result = score(pb, signals)
+    assert result.score == pytest.approx(0.20, abs=0.05)  # only high_tls_volume fires

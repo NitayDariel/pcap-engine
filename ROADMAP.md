@@ -144,7 +144,7 @@
 | Gap | Impact | Sprint |
 |---|---|---|
 | Sigma rules not integrated | No log-level signature detection | 9B |
-| RITA Docker wrapper | Gold-standard beacon scoring not available | 9C |
+| ~~RITA Docker wrapper~~ | ~~Gold-standard beacon scoring not available~~ | ✅ Sprint 9C done |
 | No HTML report | Blueprint specifies HTML output | TBD |
 | TAXII/MITRE utils | No live ATT&CK data pull | TBD |
 | ACTMINER sequence scoring | Temporal ordering reduces FP by ~39% | TBD |
@@ -280,7 +280,7 @@ Gemini:        QUOTA EXHAUSTED — free tier limit: 0 requests/day on this key
 - [x] `zkg install zeek/salesforce/ja3` — JA3/JA3S now in ssl.log via `packages` keyword
 - [x] JA3 hash lookup in Phase 6 — `check_ja3()` offline; known-bad list: CS, Meterpreter, RATs
 - [x] JA3 section in report (active/inactive status, match table)
-- [ ] Add `tls_unique_ja3_count` signal to T1573.001 playbook (deferred — playbook already fires correctly)
+- [x] Add `tls_unique_ja3_count` signal to T1573.001 playbook — `diverse_ja3_fingerprints` signal + combo bonus + 5 unit tests ✅
 
 ### Sprint 9B — Sigma Rules ✅ COMPLETE
 - [x] Sparse clone `SigmaHQ/sigma` — 21 network/zeek rules in `sigma/rules/network/zeek/`
@@ -289,11 +289,20 @@ Gemini:        QUOTA EXHAUSTED — free tier limit: 0 requests/day on this key
 - [x] Feed results as signal boosters in Phase 3 (same +0.10 boost mechanic as Suricata)
 - [x] Phase 2.6 in main.py + Sigma Rule Scan section in report
 
-### Sprint 9C — RITA Docker Wrapper
-- [ ] `docker-compose.yml` for RITA + MongoDB
-- [ ] `utils/rita.py` — call `show-beacons`, `show-dns`, parse output
-- [ ] Add `rita_beacon_score` to ProtocolSignals
-- [ ] Only runs if Docker is available (graceful skip otherwise)
+### Sprint 9C — RITA Docker Wrapper ✅ COMPLETE
+- [x] `setup/docker-compose.yml` — MongoDB 4.2 (required by RITA 4.3.1)
+- [x] `engine/utils/rita.py` — full pipeline: start mongo, import Zeek logs, `show-beacons`, parse CSV
+- [x] `rita_available`, `rita_top_beacon_score`, `rita_beacon_pairs`, `rita_beacons` added to ProtocolSignals
+- [x] Graceful skip when Docker not running (`is_available()` check)
+- [x] Report section shows RITA results (or "not available" note) above in-engine scoring
+- [x] Tested end-to-end: Colima + Docker + mongo:4.2 + RITA 4.3.1 — import + query runs cleanly
+
+**Setup notes:**
+- Requires Colima (`brew install colima && colima start`)
+- Requires docker + docker-compose (`brew install docker docker-compose`)
+- MongoDB 4.2 auto-started by rita.py; RITA image `activecm/rita:4.3.1` pulled on first use
+- `mongo:4.2` used (not `mongo:6`) — RITA 4.3.1 requires MongoDB [4.2.0, 4.3.0)
+- Config written to `~/.cache/rita_pcap_engine/` (must be under /Users for Colima volume mount)
 
 ### Sprint 10A — 8 More Playbooks (reach 30) ✅ COMPLETE
 - [x] T1550.002 Pass-the-Hash — smb_lateral_host_count, admin_share_detected, low kerberos gate

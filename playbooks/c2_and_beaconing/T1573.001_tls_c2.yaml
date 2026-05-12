@@ -44,10 +44,27 @@ signals:
     weight: 0.20
     attack_category: A
 
+  - id: diverse_ja3_fingerprints
+    description: >
+      >= 3 unique JA3 fingerprints in the capture. Legitimate users rarely run
+      more than 2-3 distinct TLS client implementations; C2 implants, loaders,
+      and stagers each carry a distinct JA3 hash, so a host running multiple
+      implant stages will exhibit JA3 diversity far above the norm.
+      Requires Zeek JA3 package (zkg install zeek/salesforce/ja3).
+    source: tls_unique_ja3_count
+    threshold: ">= 3"
+    weight: 0.15
+    threshold_low: ">= 2"
+    weight_low: 0.08
+    attack_category: B
+
 combination_bonuses:
   - signals: [missing_sni_sessions, cert_anomalies]
     bonus: 0.20
     reason: No SNI + bad certs is the textbook implant TLS fingerprint
+  - signals: [cert_anomalies, diverse_ja3_fingerprints]
+    bonus: 0.10
+    reason: Anomalous cert + JA3 diversity narrows to custom TLS client (implant)
 
 score_thresholds:
   deep_dive: 0.55
@@ -56,8 +73,9 @@ score_thresholds:
 false_positive_notes: >
   IoT devices, embedded systems, and old Java applications often omit SNI.
   Internal services may use self-signed certs legitimately.
-  Install Zeek JA3 package to fingerprint TLS client hellos against known C2 hashes —
-  this is the definitive confirmation step that this playbook cannot currently perform.
+  JA3 diversity signal requires the Zeek JA3 package (zkg install zeek/salesforce/ja3);
+  if the package is absent, tls_unique_ja3_count stays 0 and this signal does not fire.
+  For definitive confirmation, cross-reference JA3 hashes against Phase 6 known-bad list.
 
 references:
   - "MITRE ATT&CK T1573.001"

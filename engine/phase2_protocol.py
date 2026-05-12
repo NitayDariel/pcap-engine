@@ -128,9 +128,16 @@ class ProtocolSignals:
     # --- Web service C2 (T1102) ---
     dns_c2_service_lookup_count: int = 0        # DNS queries for Telegram/Discord/Pastebin/Slack C2 platforms
 
-    # --- Beaconing (RITA-style 4-factor composite) ---
+    # --- Beaconing (RITA-style 4-factor composite, computed in-engine) ---
     beacon_candidates: list = field(default_factory=list)  # list of BeaconCandidate
     beacon_top_score: float = 0.0                          # highest composite score seen
+
+    # --- RITA (Docker, gold-standard beacon scoring) ---
+    # Populated only when Docker/Colima is available; zero/empty otherwise.
+    rita_available: bool = False
+    rita_top_beacon_score: float = 0.0    # highest RITA beacon score (0–1)
+    rita_beacon_pairs: int = 0            # src→dst pairs with score >= 0.5
+    rita_beacons: list = field(default_factory=list)  # list of BeaconEntry
 
     # --- Singleton suspicious domains ---
     # Domains queried exactly once that match delivery/RAT/stealer heuristics.
@@ -725,5 +732,24 @@ def run(
                 for svc in _C2_SERVICE_DOMAINS
             )
         ))
+
+    # RITA (Docker gold-standard beacon scoring) — optional enrichment layer
+    from engine.utils.rita import is_available as rita_available_check, run as rita_run
+    if rita_available_check():
+        print("  [Phase 2] RITA (Docker) available — running gold-standard beacon scoring...")
+        rita_result = rita_run(log_dir_str)
+        if rita_result.available:
+            signals.rita_available = True
+            signals.rita_top_beacon_score = rita_result.top_beacon_score
+            signals.rita_beacon_pairs = rita_result.beacon_pairs
+            signals.rita_beacons = [vars(b) for b in rita_result.beacons[:20]]
+            print(
+                f"  [Phase 2] RITA: {rita_result.beacon_pairs} high-confidence beacon pair(s), "
+                f"top score={rita_result.top_beacon_score:.3f}"
+            )
+        else:
+            print(f"  [Phase 2] RITA unavailable: {rita_result.error}")
+    else:
+        print("  [Phase 2] RITA (Docker) not available — skipping (start Colima for gold-standard beacon scoring)")
 
     return signals

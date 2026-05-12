@@ -1,15 +1,32 @@
+version: "3.8"
+
+# MongoDB backend for RITA v4.x beacon analysis.
+# RITA itself runs as one-shot `docker run` commands via engine/utils/rita.py —
+# it does not run as a persistent service here.
+#
+# Usage (managed automatically by utils/rita.py):
+#   docker-compose -f setup/docker-compose.yml up -d mongo
+#   docker-compose -f setup/docker-compose.yml down
+
 services:
-  rita:
-    image: activecm/rita:latest
-    container_name: rita
+  mongo:
+    image: mongo:4.2   # RITA 4.3.1 requires MongoDB [4.2.0, 4.3.0)
+    container_name: rita_mongo
     restart: unless-stopped
     volumes:
-      - rita_data:/var/lib/rita
-      - ../zeek_logs:/zeek_logs:ro
-    ports:
-      - "4380:4380"
-    environment:
-      - RITA_LOG_LEVEL=info
+      - rita_mongo_data:/data/db
+    networks:
+      - rita_net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  rita_net:
+    name: rita_net
+    driver: bridge
 
 volumes:
-  rita_data:
+  rita_mongo_data:

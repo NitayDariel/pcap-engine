@@ -780,14 +780,36 @@ def generate(
             lines.append(_finding_block(result, dd, ioc_results))
 
     # ── Beacon Analysis ───────────────────────────────────────────────────
-    lines.append(_section("Beacon Analysis (RITA-style)"))
+    lines.append(_section("Beacon Analysis"))
+
+    # RITA (Docker gold-standard) — shown when available
+    if getattr(signals, "rita_available", False):
+        lines.append(
+            f"**RITA (gold-standard):** {signals.rita_beacon_pairs} high-confidence pair(s) "
+            f"· top score **{signals.rita_top_beacon_score:.3f}**\n"
+        )
+        rita_beacons = getattr(signals, "rita_beacons", [])
+        if rita_beacons:
+            lines.append("| Src | Dst | Connections | Top Interval | RITA Score |")
+            lines.append("|---|---|---|---|---|")
+            for b in rita_beacons[:10]:
+                lines.append(
+                    f"| `{b.get('src_ip', '?')}` | `{b.get('dst_ip', '?')}` "
+                    f"| {b.get('connections', 0)} | {b.get('top_interval_secs', 0):.0f}s "
+                    f"| **{b.get('score', 0):.3f}** |"
+                )
+            lines.append("")
+    else:
+        lines.append("_RITA (Docker) not available — start Colima for gold-standard beacon scoring._\n")
+
+    # In-engine RITA-style composite (always runs)
     beacon_candidates = signals.beacon_candidates or []
     if not beacon_candidates:
-        lines.append("_No beacon candidates detected (no pair reached the 0.50 composite threshold)._\n")
+        lines.append("_In-engine beacon scoring: no candidates (no pair reached 0.50 threshold)._\n")
     else:
         lines.append(
-            f"**{len(beacon_candidates)} beacon candidate(s)** found. "
-            f"Top composite score: **{signals.beacon_top_score:.3f}**\n"
+            f"**In-engine beacon scoring:** {len(beacon_candidates)} candidate(s) "
+            f"· top score **{signals.beacon_top_score:.3f}**\n"
         )
         lines.append("| Src | Dst | Port | Count | Modal Interval | Jitter | Avg Bytes | Duration | Score |")
         lines.append("|---|---|---|---|---|---|---|---|---|")
@@ -802,7 +824,7 @@ def generate(
                 f"| **{b['composite_score']:.3f}** |"
             )
         lines.append("")
-        lines.append("Score components (interval / size / freq / persist):")
+        lines.append("Score components (interval CV / payload CV / frequency / persistence):")
         for b in beacon_candidates[:5]:
             lines.append(
                 f"- `{b['src_ip']}` → `{b['dst_ip']}:{b['dst_port']}` — "
