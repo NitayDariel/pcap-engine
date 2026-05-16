@@ -142,6 +142,91 @@ These are written to `anomalies.json` alongside the report. An analyst (or AI) c
 
 ---
 
+## Why False Positives Are Low
+
+Most tools fire on single indicators. This engine requires a *constellation* of signals to align simultaneously — each signal has innocent explanations on its own, but their intersection does not. Three real examples:
+
+---
+
+### C2 Beacon — Catching a Machine Hidden in Normal Traffic
+
+An implant calls home every 60 seconds. The traffic looks like regular HTTPS.
+The engine measures four statistically independent properties across 30+ connections:
+
+```
+                      Normal browsing        C2 implant
+
+  Interval CV         1.5 – 3.0              0.03 – 0.08   ✓
+  (stddev / mean)     chaotic, human          machine-clock
+
+  Payload CV          1.2 – 2.5              0.02 – 0.15   ✓
+  (bytes / conn)      varies by page          same heartbeat
+
+  Frequency score     < 0.15                 0.70 – 0.95   ✓
+  (modal clustering)  spread randomly         bunched at 60s
+
+  Session duration    < 15 min active         2 – 8 hours   ✓
+  (persistence)       tab closes, moves on    persistent C2
+
+                                   all four ✓
+                                       ↓
+                          Composite score: 0.87  →  BEACON — HIGH
+```
+
+**Why FP is near zero:** Variance in real browsing is structural — a user clicking links generates fundamentally random timing. All four factors simultaneously collapsing into machine regularity cannot happen in organic traffic. One suspicious factor: ignored. All four: the only explanation is a scheduled process.
+
+---
+
+### DNS Exfiltration — Five Weak Signals, One Strong Conclusion
+
+Data is being encoded into DNS query subdomains and sent to an attacker-controlled nameserver.
+
+```
+  Normal query:   "mail.google.com"                      (14 chars, A record)
+  Tunnel query:   "aGVsbG8gd29ybGQhIEkgYW0g.evil.ru"    (34 chars, TXT, NXDOMAIN)
+                   └──── base64-encoded payload ────┘         ↑
+                                                         high-risk TLD
+
+  Five signals — each with an innocent single-cause explanation alone:
+
+    avg query length ≥ 40 chars    ← alone: could be CDN tracking token
+    TXT/NULL record ratio > 20%    ← alone: could be SPF/DKIM verification
+    subdomain entropy > 4.0 bits   ← alone: could be UUID-based microservice
+    >10 unique subdomains/parent   ← alone: could be SaaS endpoint diversity
+    NXDOMAIN rate > 30%            ← alone: could be misconfiguration
+
+    all five simultaneously → no legitimate traffic profile matches
+
+  T1071.004 DNS Tunneling  →  HIGH   (combo bonus +0.20 on diversity × length)
+```
+
+**Why FP is near zero:** A real service would need to simultaneously use encoded subdomains as a bulk transport mechanism, serve TXT records for data, cycle through hundreds of FQDNs, and produce mass NXDOMAINs. That service does not exist outside of intentional covert channels.
+
+---
+
+### DCSync — Protocol on the Wrong Host
+
+An attacker simulates a domain controller to pull all password hashes via AD replication.
+
+```
+  MS-DRSR protocol (Directory Replication Service) observed on the wire.
+                                   │
+                    ┌──────────────┴──────────────┐
+                    │                             │
+            source = DC01 (10.0.0.5)     source = DESKTOP-B8 (10.11.26.183)
+            DC-to-DC replication          ← workstation
+            [normal, ignored]
+                                                  │
+                              drsuapi_attacker_source_count = 1
+                                                  │
+                                                  ▼
+                                   T1003.006 DCSync  →  CONFIRMED
+```
+
+**Why FP is zero:** MS-DRSR has exactly one legitimate use — domain controller synchronisation. It requires DC-level Kerberos privileges by design. A workstation that calls the AD replication API without being a domain controller is definitionally performing credential extraction. There is no misconfiguration, no CDN, no edge case that produces this pattern innocently. The engine excludes known DCs before firing, so the remaining signal is binary.
+
+---
+
 ## IOC Enrichment Details
 
 ```
