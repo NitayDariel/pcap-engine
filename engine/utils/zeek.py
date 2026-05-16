@@ -54,13 +54,19 @@ def run_zeek(
         _ZEEK_PACKAGES_SCRIPT,          # load zkg packages (JA3/JA3S if installed)
     ]
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=str(out),  # run from output dir so relative log paths resolve
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(out),  # run from output dir so relative log paths resolve
+        )
+    except subprocess.TimeoutExpired:
+        raise ZeekError(
+            f"Zeek timed out after {timeout}s. The PCAP may be too large. "
+            f"Try --zeek-timeout {timeout * 2} or --max-pcap-mb to reject oversized files."
+        )
 
     # zeek exits 0 on success, 1 on non-fatal warnings, higher on real errors
     if result.returncode > 1:

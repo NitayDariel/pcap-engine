@@ -1,6 +1,6 @@
 # PCAP Engine — Roadmap
 
-> Live document. Update status fields in-place. Last updated: 2026-05-12 (Sprint 11A — singleton domain detection + README accuracy fixes + Gemini key update)
+> Live document. Update status fields in-place. Last updated: 2026-05-17 (Sprint 11B — resource limits + pyproject.toml; Sprint 12 evasion gaps documented)
 
 ---
 
@@ -187,7 +187,7 @@ Full skeptic review surfaced the issues below. Each is tracked to a fix sprint.
 | M1 | Anomaly thresholds are magic numbers with no calibration: `dns_nxdomain_rate >= 0.20`, `tls_missing_sni >= 5`, etc. Real environments have wildly different baselines; these are false-positive generators. | `phase7_anomaly.py` | 🔲 Sprint 11B — tie to calibrator |
 | M2 | Single-victim assumption — engine picks one victim IP and all analysis centers on it. Multi-host captures with lateral movement between several victims silently lose non-primary activity. | `phase1_orientation.py`, `reporter.py` | 🔲 Sprint 12 architectural work |
 | M3 | No structured logging — entire pipeline uses `print()`. Cannot integrate with log aggregators, replay analysis runs, or grep for warnings. | all phases | 🔲 Sprint 12 |
-| M4 | No resource limits — no PCAP size check, no subprocess timeout on Zeek. A malformed or very large capture will OOM or hang indefinitely. | `phase2_protocol.py`, `utils/zeek.py` | 🔲 Sprint 11B |
+| M4 | No resource limits — no PCAP size check, no subprocess timeout on Zeek. A malformed or very large capture will OOM or hang indefinitely. | `phase2_protocol.py`, `utils/zeek.py` | ✅ Fixed Sprint 11B (`--max-pcap-mb`, `--zeek-timeout`, `TimeoutExpired` → `ZeekError`) |
 | M5 | JA3 list is static with no update mechanism and no per-entry provenance. No reference to original source for each hash. | `phase6_ioc_enrichment.py` | ✅ Partially fixed Sprint 11 (bad hash removed; provenance comments added) |
 
 ### LOW — Code Quality
@@ -197,7 +197,7 @@ Full skeptic review surfaced the issues below. Each is tracked to a fix sprint.
 | L1 | `warnings.filterwarnings("ignore")` suppresses ALL Python warnings globally, masking real dependency issues. | `main.py:15` | ✅ Fixed Sprint 11 (targeted filter) |
 | L2 | `false_positive_notes` field in playbook YAML is never read by scorer or reporter — FP guidance written by playbook authors is invisible in the output report. | `scorer.py`, `reporter.py` | ✅ Fixed Sprint 11 |
 | L3 | No encrypted-DNS (DoH/DoT) or IPv6 coverage — modern C2 increasingly uses DoH to bypass all DNS signal computation. | multiple | 🔲 Sprint 13 research spike |
-| L4 | `sys.path.insert` in main.py instead of proper `pyproject.toml` package — prevents `pip install -e .`, breaks imports from arbitrary working directories. | `main.py:18` | 🔲 Sprint 11B (add pyproject.toml) |
+| L4 | `sys.path.insert` in main.py instead of proper `pyproject.toml` package — prevents `pip install -e .`, breaks imports from arbitrary working directories. | `main.py:18` | ✅ Fixed Sprint 11B — `pyproject.toml` added; `pip install -e .` + `pcap-engine` CLI entry point now work |
 
 ---
 
@@ -319,6 +319,140 @@ Gemini:        QUOTA EXHAUSTED — free tier limit: 0 requests/day on this key
 - [ ] `tests/test_beacon.py` — beacon scoring determinism tests
 - [ ] `tests/test_integration.py` — run engine against known PCAP, assert key findings
 - [ ] `run_tests.sh` wrapper
+
+### Sprint 11B — Infrastructure Hardening ✅ COMPLETE
+- [x] M4: PCAP size guard — `--max-pcap-mb` flag (default 500 MB); hard abort on oversized files; warning printed to stderr
+- [x] M4: Zeek timeout exposed as `--zeek-timeout` CLI flag (default 300s); `TimeoutExpired` caught and re-raised as `ZeekError` with actionable hint
+- [x] L4: `pyproject.toml` — `pip install -e .` now works; `engine` package declared; `pytest` config centralized; `sys.path.insert` removed from `main.py`
+
+---
+
+## Sprint 12 — Evasion-Aware Detection Hardening
+
+> **Status: DOCUMENTED — not yet implemented**
+> These items capture known detection rule gaps that make the engine over-tuned for commodity malware and blind to adversaries who deliberately avoid triggering thresholds.
+> Implement incrementally; document first so future sprints have the context.
+
+### Why This Matters
+
+The current playbook architecture uses **hard threshold gates**: a signal must meet its threshold for the technique to score above LOW. This is reasonable for reducing false positives, but creates systematic blind spots for adversaries who read detection rules — or simply operate differently from the commodity malware the rules were calibrated against.
+
+The principle of **"no single signal should gate MEDIUM+ confidence if a prepared adversary can trivially zero it out"** should guide all future threshold decisions.
+
+---
+
+### E1 — DNS Tunneling: NXDOMAIN Rate Is a Gate, Not a Bonus
+
+**Playbook affected:** `T1048.001_dns_txt_exfil.yaml`, `T1071.004_dns_tunneling.yaml`
+
+**Current behavior:**
+```yaml
+- id: dns_nxdomain_ratio
+  threshold: ">= 0.30"   # ← hard gate for scoring above LOW
+```
+
+**The gap:**  
+Commodity DNS tunneling tools (dns2tcp, iodine, dnscat2) generate high NXDOMAIN rates because they probe random subdomains before establishing the tunnel. Sophisticated attackers **buy a domain in advance**, configure a DNS server that always responds with valid records, and generate zero NXDOMAINs. The NXDOMAIN signal correctly detects amateurs; it misses professionals.
+
+**Fix:**  
+Demote `dns_nxdomain_ratio` to a **bonus-only** weight (e.g., `weight_low` only, no `threshold` that gates HIGH/MEDIUM scoring). The technique should be scoreable at MEDIUM based on entropy + subdomain diversity alone.
+
+**Effort:** Small — playbook YAML edit + scorer validation  
+**Priority:** High (directly caused a false-negative on the 2024-11-26 ground truth PCAP — T1071.004 scored below threshold due to zero NXDOMAINs)
+
+---
+
+### E2 — DNS Tunneling: Subdomain Entropy Gate Too Strict
+
+**Playbook affected:** `T1071.004_dns_tunneling.yaml`
+
+**Current behavior:**
+```yaml
+- id: dns_subdomain_entropy
+  threshold: ">= 4.0"   # ← Shannon entropy gate
+```
+
+**The gap:**  
+Tools like `iodine-c2` and custom tunneling agents can encode data using **dictionary words, Base32, or time-based patterns** that look like low-entropy subdomains (e.g., `mail.corp.evil.com`, `auth.api.evil.com`). Additionally, attackers who pre-register a domain and warm it up with normal-looking traffic will have mixed-entropy subdomain histories that dilute the average below the gate.
+
+**Fix:**  
+Lower threshold to `>= 3.5` AND separate the entropy signal into `threshold` (fires for bursts) and `threshold_low` (fires for sustained moderate entropy). Consider computing entropy on the **most active subdomain prefix** rather than the full FQDN.
+
+**Effort:** Small (playbook YAML) + Medium (signal computation in `phase2_protocol.py`)  
+**Priority:** Medium
+
+---
+
+### E3 — Beacon Detection: High-Jitter C2 Below Interval CV Threshold
+
+**Playbook affected:** `T1071.001_http_c2.yaml`, `T1095_raw_socket_c2.yaml`
+
+**The gap:**  
+The in-engine beacon scorer uses **interval CV** (coefficient of variation) as the primary signal — low CV means regular timing, suggesting a beacon. Mature C2 frameworks (Cobalt Strike "sleep jitter", Brute Ratel, Havoc) use configurable jitter (30–50%) specifically to raise CV above detection thresholds. A beacon with 60s base interval + 50% jitter produces CV ≈ 0.29 — below most thresholds.
+
+RITA's `interval_skew` and `size_skew` factors partly compensate for this, but are still calibrated against lower-jitter malware.
+
+**Fix:**  
+Add a **bimodal interval distribution check**: when a connection has 2-4 distinct modal intervals in a 2:1 ratio (base ± jitter), it's more suspicious than random traffic even if CV is high. This requires histogram-based analysis, not just CV.
+
+**Effort:** Large (new signal computation + RITA doesn't expose this)  
+**Priority:** Medium — RITA's skew factors partially mitigate this
+
+---
+
+### E4 — Domain Fronting / CDN-Based C2 Completely Invisible
+
+**Techniques affected:** T1090.004, T1071.001
+
+**The gap:**  
+C2 traffic routed through Cloudflare, Azure CDN, or AWS CloudFront looks like normal HTTPS to a CDN endpoint. The SNI field shows a **legitimate CDN domain** (e.g., `cloudflare.com`), but the HTTP Host header (encrypted) routes to the actual C2. All our signals — cert anomalies, JA3, domain reputation — fire on the CDN's certificate and reputation, which are clean.
+
+**What we can detect (partially):**  
+- High volume to a single CDN IP with low unique domain diversity (unusual for normal browsing)  
+- TLS session with very uniform payload sizes (structured C2 protocol, not human browsing)  
+- Beacon intervals to CDN IP even if SNI is clean
+
+**Fix ideas:**  
+- Add signal: `tls_cdn_ip_beacon_score` — run beacon scoring specifically against known CDN IP ranges (Cloudflare, Fastly, Azure). High-beacon-score traffic to CDN IPs is suspicious.  
+- Add signal: `tls_sni_to_cdn_ratio` — high ratio of CDN SNIs in TLS traffic from a single host suggests fronting.
+
+**Effort:** Large (requires CDN IP range list + new beacon sub-analysis)  
+**Priority:** Low (hard to do without ground truth; document for sprint 13+)
+
+---
+
+### E5 — Credential Access: Kerberoasting Low-SPN-Count Gate Creates Blind Spot
+
+**Playbook affected:** `T1558.003_kerberoasting.yaml`
+
+**The gap:**  
+The playbook gates at `spn_request_count >= 3` to avoid FP on normal auth. A sophisticated attacker performing targeted Kerberoasting (one specific high-value SPN — e.g., `MSSQLSvc/db.corp.local`) will request exactly 1 SPN with RC4 downgrade. The signal fires but may score only LOW, masking a high-confidence finding.
+
+**Fix:**  
+When `rc4_tgs_count >= 1` AND `spn_request_count == 1` (targeted), treat as a **stronger signal** than bulk Kerberoasting. Single RC4-downgraded TGS for a privileged SPN is more targeted (and likely more dangerous) than 10 RC4 TGS for service accounts.
+
+**Effort:** Small (playbook YAML + scorer logic)  
+**Priority:** Medium
+
+---
+
+### E6 — General Principle: Single-Signal Gates vs. Composite Confidence
+
+**Applies to:** All playbooks
+
+**The gap:**  
+Any playbook that can reach MEDIUM+ confidence via a **single signal crossing its threshold** is exploitable by zeroing that signal. Examples:
+- `T1040` (credential sniffing): fires on `plaintext_cred_count >= 1` alone
+- `T1046` (port scan): fires on `scan_syn_count >= 100` alone  
+- `T1003.006` (DCSync): fires on `drsuapi_connection_count >= 1` from non-DC — this one is actually correct (binary indicator)
+
+**The fix principle:**  
+For TTPs where the adversary has control over the signals, require **at least 2 independent signals** to reach MEDIUM or above. For binary indicators (DCSync, specific protocol presence), single-signal gates are acceptable.
+
+**Effort:** Review all 30 playbooks — medium effort sprint  
+**Priority:** Low (systematic audit, not a quick fix)
+
+---
 
 ### Later / Stretch Goals
 - HTML report output (add Jinja2 template)

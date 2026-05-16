@@ -20,7 +20,8 @@ warnings.filterwarnings("ignore", message=".*Unverified HTTPS.*")       # urllib
 warnings.filterwarnings("ignore", message=".*google.*Python version.*") # google SDK on py3.9
 warnings.filterwarnings("ignore", message=".*end of life.*")            # google SDK eol notice
 
-# Add project root to path so `engine.*` imports resolve
+# Fallback for direct invocation (`python engine/main.py`).
+# When installed via `pip install -e .` (pyproject.toml), this is a no-op.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from engine import phase1_orientation, phase2_protocol, phase3_ttp_sweep
@@ -58,6 +59,14 @@ Examples:
     p.add_argument("--max-iocs", type=int, default=10, help="Max IPs to enrich via VT/ThreatFox (default: 10)")
     p.add_argument("--playbooks", default=None, help="Path to playbooks directory")
     p.add_argument("--no-suricata", action="store_true", help="Skip Suricata signature scan")
+    p.add_argument(
+        "--max-pcap-mb", type=int, default=500,
+        help="Abort if PCAP exceeds this size in MB (default: 500). Use 0 to disable.",
+    )
+    p.add_argument(
+        "--zeek-timeout", type=int, default=300,
+        help="Seconds before Zeek subprocess is killed (default: 300).",
+    )
     return p.parse_args()
 
 
@@ -76,6 +85,14 @@ def main() -> None:
     pcap = str(Path(args.pcap).resolve())
     if not Path(pcap).exists():
         print(f"[ERROR] PCAP file not found: {pcap}")
+        sys.exit(1)
+
+    pcap_mb = Path(pcap).stat().st_size / (1024 * 1024)
+    if args.max_pcap_mb > 0 and pcap_mb > args.max_pcap_mb:
+        print(
+            f"[ERROR] PCAP is {pcap_mb:.0f} MB — exceeds --max-pcap-mb {args.max_pcap_mb} MB.\n"
+            f"        Use --max-pcap-mb 0 to disable the guard, or split the capture first."
+        )
         sys.exit(1)
 
     # Derive output directory
@@ -107,7 +124,7 @@ def main() -> None:
     # ── Phase 2: Protocol Analysis ────────────────────────────────────────
     print("[Phase 2] Protocol analysis — computing signals from Zeek logs...")
     t0 = time.time()
-    signals = phase2_protocol.run(pcap, ctx, zeek_log_dir=args.zeek_logs)
+    signals = phase2_protocol.run(pcap, ctx, zeek_log_dir=args.zeek_logs, zeek_timeout=args.zeek_timeout)
     print(f"          DNS: {signals.dns_packet_count} pkts · HTTP: {signals.http_packet_count} pkts · "
           f"TLS: {signals.tls_packet_count} pkts · SMB: {signals.smb_packet_count} pkts")
     print(f"          Zeek logs: {signals.zeek_log_dir}")

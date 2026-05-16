@@ -590,6 +590,7 @@ def run(
     pcap_path: str,
     ctx: AnalysisContext,
     zeek_log_dir: Optional[str] = None,
+    zeek_timeout: int = 300,
 ) -> ProtocolSignals:
     """
     Run Phase 2 protocol analysis. Returns populated ProtocolSignals.
@@ -599,7 +600,7 @@ def run(
 
     # Run Zeek if no pre-existing log dir provided
     if zeek_log_dir is None:
-        log_dir = run_zeek(pcap)
+        log_dir = run_zeek(pcap, timeout=zeek_timeout)
     else:
         log_dir = Path(zeek_log_dir)
 
